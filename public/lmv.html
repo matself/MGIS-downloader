@@ -35,33 +35,35 @@
             <div class="auth-row">
               <div class="auth-col">
                 <div class="auth-method" id="auth-methods">
-                  <label class="auth-option active"><input type="radio" name="auth-method" value="userpass" checked> Användarnamn + API-nyckel</label>
-                  <label class="auth-option"><input type="radio" name="auth-method" value="token"> Auth token (Bearer)</label>
-                </div>
-
-                <div id="userpass-fields">
-                  <label for="apiUsername">LMV Användarnamn:</label>
-                  <input type="text" id="apiUsername" name="apiUsername" autocomplete="username">
-                  
-                  <label for="apiKey">LMV STAC API Key:</label>
-                  <input type="password" id="apiKey" name="apiKey" autocomplete="current-password">
+                  <label class="auth-option active"><input type="radio" name="auth-method" value="userpass" checked> Geotorget systemkonto</label>
+                  <label class="auth-option"><input type="radio" name="auth-method" value="token"> API Manager Bearer token</label>
                 </div>
 
                 <div id="token-field" style="display:none;" class="token-input">
-                  <label for="apiToken">Auth token:</label>
-                  <input type="text" id="apiToken" name="apiToken" placeholder="Bearer token...">
+                  <label for="apiToken">Bearer token (från API Manager):</label>
+                  <input type="text" id="apiToken" name="apiToken" placeholder="eyJ...">
+                </div>
+
+                <div id="token-fallback-note" style="display:none; margin-top:8px; padding:6px 10px; font-size:0.85em; color:#555; background:#f0f4ff; border-left:3px solid #3273dc; border-radius:2px;">
+                  Ange Geotorget-konto nedan (valfritt). Används automatiskt som fallback om Bearer-token nekas av nedladdningsservern (dl1) för ett specifikt dataset.
+                </div>
+
+                <div id="userpass-fields">
+                  <label for="apiUsername" id="label-apiUsername">Systemkonto:</label>
+                  <input type="text" id="apiUsername" name="apiUsername" placeholder="t.ex. elma0001" autocomplete="username">
+
+                  <label for="apiKey" id="label-apiKey">Lösenord:</label>
+                  <input type="password" id="apiKey" name="apiKey" autocomplete="current-password">
                 </div>
               </div>
 
               <div class="auth-col">
                 <div class="credential-warning">
-                  <strong>Varning:</strong> Använd antingen ett token genererat i <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">API Manager (apimanager)</a> <em>eller</em> ett systemkonto från <a href="https://geotorget.lantmateriet.se/" target="_blank">Geotorget</a>. Token måste ha rätt scopes för STAC (collections/assets).
+                  <strong>Geotorget systemkonto</strong> — skapa på <a href="https://geotorget.lantmateriet.se/" target="_blank">geotorget.lantmateriet.se</a>. Kom ihåg att även beställa de dataset du vill ladda ner.<br><br>
+                  <strong>API Manager Bearer token</strong> — generera på <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">apimanager.lantmateriet.se</a>. Token används mot STAC-katalogen och dl1 när det stöds. Fyll i Geotorget-konto (valfritt) för automatisk fallback om Bearer nekas av dl1.
                 </div>
               </div>
             </div>
-            <p class="info-text" style="margin-top:6px;color:#9a1f00;background:#fff6f6;padding:8px;border-left:4px solid #ff3860;">
-              <strong>Viktigt:</strong> Använd ett token genererat i <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">API Manager</a> eller ett <em>systemkonto</em> från <a href="https://geotorget.lantmateriet.se/" target="_blank">Geotorget</a>. Token måste ha rätt scopes för STAC (collections/assets).
-            </p>
             
             <div class="checkbox-group">
               <input type="checkbox" id="remember-credentials">
@@ -129,6 +131,17 @@
         </div>
         <div>
         </div>
+
+        <details style="margin-top:24px; border:1px solid #ddd; border-radius:4px; padding:12px;">
+          <summary style="cursor:pointer; font-weight:bold; color:#3273dc;">🔧 Diagnostik: testa dl1-nedladdning direkt</summary>
+          <div style="margin-top:10px;">
+            <p style="font-size:0.9em; color:#555;">Klistra in en asset-URL från STAC (börjar med <code>https://dl1.lantmateriet.se/</code>) för att testa om dina uppgifter fungerar mot nedladdningsservern.</p>
+            <label for="diag-url">dl1-URL att testa:</label>
+            <input type="text" id="diag-url" placeholder="https://dl1.lantmateriet.se/..." style="width:100%; margin-bottom:8px;">
+            <button type="button" id="diag-test-btn" style="background:#3273dc; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer;">Testa åtkomst</button>
+            <pre id="diag-result" style="margin-top:10px; background:#f5f5f5; padding:8px; border-radius:4px; font-size:0.82em; white-space:pre-wrap; display:none;"></pre>
+          </div>
+        </details>
     </div>
     
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -136,7 +149,7 @@
     <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js" crossorigin=""></script>
     
     <script>
-      // Sistema de almacenamiento seguro de credenciales (soporta token o user/pass)
+      // Secure credential storage system (supports token or username/password)
       (function() {
         const apiUsernameInput = document.getElementById('apiUsername');
         const apiKeyInput = document.getElementById('apiKey');
@@ -148,16 +161,25 @@
 
         function updateAuthVisibility() {
           const method = Array.from(authRadios).find(r => r.checked).value;
+          const fallbackNote = document.getElementById('token-fallback-note');
           if (method === 'token') {
-            userpassFields.style.display = 'none';
+            // Token mode: Bearer token required; Geotorget credentials optional for dl1 fallback
             tokenField.style.display = 'block';
-          } else {
+            if (fallbackNote) fallbackNote.style.display = 'block';
             userpassFields.style.display = 'block';
+            document.getElementById('label-apiUsername').textContent = 'Systemkonto (dl1-fallback, valfritt):';
+            document.getElementById('label-apiKey').textContent = 'Lösenord (dl1-fallback, valfritt):';
+          } else {
+            // Userpass mode: Geotorget system account (Basic Auth against STAC and dl1)
             tokenField.style.display = 'none';
+            if (fallbackNote) fallbackNote.style.display = 'none';
+            userpassFields.style.display = 'block';
+            document.getElementById('label-apiUsername').textContent = 'Systemkonto:';
+            document.getElementById('label-apiKey').textContent = 'Lösenord:';
           }
         }
 
-        // Cargar credenciales guardadas
+        // Load saved credentials
         const savedMethod = localStorage.getItem('lmv_auth_method') || 'userpass';
         Array.from(authRadios).forEach(r => { if (r.value === savedMethod) r.checked = true; });
         updateAuthVisibility();
@@ -173,22 +195,25 @@
             apiUsernameInput.value = savedUsername;
             apiKeyInput.value = atob(savedApiKey);
           }
-          if (savedMethod === 'token' && savedToken) {
-            apiTokenInput.value = atob(savedToken);
+          if (savedMethod === 'token') {
+            if (savedToken) apiTokenInput.value = atob(savedToken);
+            // Also restore optional Geotorget fallback credentials for dl1
+            if (savedUsername) apiUsernameInput.value = savedUsername;
+            if (savedApiKey) apiKeyInput.value = atob(savedApiKey);
           }
         }
 
-        // Cambiar visibilidad al seleccionar metodo
+        // Update visibility when the authentication method changes
         Array.from(authRadios).forEach(r => r.addEventListener('change', function() {
           localStorage.setItem('lmv_auth_method', this.value);
           updateAuthVisibility();
-          // Toggle active class on labels
+          // Toggle active CSS class on labels
           document.querySelectorAll('.auth-option').forEach(opt => opt.classList.remove('active'));
           const parentLabel = this.closest('label') || this.parentElement;
           if (parentLabel && parentLabel.classList) parentLabel.classList.add('active');
         }));
 
-        // Guardar o eliminar credenciales cuando cambia el checkbox
+        // Save or clear credentials when the checkbox changes
         rememberCheckbox.addEventListener('change', function() {
           if (this.checked) {
             const method = Array.from(authRadios).find(r => r.checked).value;
@@ -204,6 +229,9 @@
               const token = apiTokenInput.value;
               if (token) {
                 localStorage.setItem('lmv_token', btoa(token));
+                // Also save optional Geotorget fallback credentials for dl1
+                if (apiUsernameInput.value) localStorage.setItem('lmv_username', apiUsernameInput.value);
+                if (apiKeyInput.value) localStorage.setItem('lmv_apikey', btoa(apiKeyInput.value));
                 localStorage.setItem('lmv_remember', 'true');
               }
             }
@@ -215,7 +243,7 @@
           }
         });
 
-        // Actualizar almacenamiento cuando se modifican los campos
+        // Update stored credentials whenever the input fields change
         [apiUsernameInput, apiKeyInput, apiTokenInput].forEach(input => {
           input && input.addEventListener('input', function() {
             if (rememberCheckbox.checked) {
@@ -226,6 +254,9 @@
                 localStorage.setItem('lmv_apikey', btoa(apiKeyInput.value));
               } else {
                 localStorage.setItem('lmv_token', btoa(apiTokenInput.value));
+                // Also persist optional Geotorget fallback credentials for dl1
+                if (apiUsernameInput.value) localStorage.setItem('lmv_username', apiUsernameInput.value);
+                if (apiKeyInput.value) localStorage.setItem('lmv_apikey', btoa(apiKeyInput.value));
               }
             }
           });

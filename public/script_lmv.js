@@ -5,26 +5,26 @@
  */
 
 
-// --- Variables Globales de Estado (LMV) ---
-// Elementos del DOM se declararán después de DOMContentLoaded
+// --- Global State Variables (LMV) ---
+// DOM elements are declared after DOMContentLoaded
 let lmvForm, prepareBtn, resultMessage, downloadSection, downloadBtn;
 let foundCollectionName, foundItemCount, downloadInfo, downloadLinksList;
 let minLonInput, maxLonInput, minLatInput, maxLatInput;
 
-// Variables de estado
+// State variables
 let currentCollectionId = null;
 let currentWKTGeometry = null;
 let currentApiKey = null;
 let currentItemsCount = 0;
 
-// --- Inicialización del Mapa Leaflet ---
+// --- Leaflet Map Initialisation ---
 let map = null;
 let drawnItems = null;
 
 function initializeMap() {
-    if (map) return; // Evitar reinicializar
+    if (map) return; // Prevent re-initialisation
 
-    map = L.map('mapid').setView([62, 15], 4); // Centrado aprox en Suecia
+    map = L.map('mapid').setView([62, 15], 4); // Centred approximately on Sweden
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 18,
@@ -42,7 +42,7 @@ function initializeMap() {
     });
     map.addControl(drawControl);
 
-    // --- Eventos del mapa ---
+    // --- Map events ---
     map.on(L.Draw.Event.CREATED, function (event) {
         const layer = event.layer;
         const bounds = layer.getBounds();
@@ -50,7 +50,7 @@ function initializeMap() {
         const minLon = southWest.lng; const minLat = southWest.lat;
         const maxLon = northEast.lng; const maxLat = northEast.lat;
 
-        // Guardar como GeoJSON en lugar de WKT
+        // Store as GeoJSON instead of WKT
         currentWKTGeometry = {
             type: 'Polygon',
             coordinates: [[
@@ -61,7 +61,7 @@ function initializeMap() {
                 [minLon, minLat]
             ]]
         };
-        console.log("Geometría desde mapa (GeoJSON):", JSON.stringify(currentWKTGeometry));
+        console.log("Geometry from map (GeoJSON):", JSON.stringify(currentWKTGeometry));
 
         minLonInput.value = minLon.toFixed(6); maxLonInput.value = maxLon.toFixed(6);
         minLatInput.value = minLat.toFixed(6); maxLatInput.value = maxLat.toFixed(6);
@@ -75,7 +75,7 @@ function initializeMap() {
         currentWKTGeometry = null;
         minLonInput.value = ''; maxLonInput.value = '';
         minLatInput.value = ''; maxLatInput.value = '';
-        console.log("WKT Geometry och koordinatfält rensade");
+        console.log("WKT Geometry and coordinate fields cleared");
         showMessage("Området har tagits bort från kartan.", "info");
     });
 
@@ -96,7 +96,7 @@ function initializeMap() {
                     [minLon, minLat]
                 ]]
             };
-            console.log("Geometría editada (GeoJSON):", JSON.stringify(currentWKTGeometry));
+            console.log("Edited geometry (GeoJSON):", JSON.stringify(currentWKTGeometry));
             minLonInput.value = minLon.toFixed(6); maxLonInput.value = maxLon.toFixed(6);
             minLatInput.value = minLat.toFixed(6); maxLatInput.value = maxLat.toFixed(6);
         });
@@ -104,7 +104,7 @@ function initializeMap() {
     });
 }
 
-// --- Función para validar coordenadas de los inputs y generar GeoJSON ---
+// --- Validate coordinate inputs and build a GeoJSON geometry ---
 function validateAndGetWKTFromInputs() {
     if (!minLonInput || !maxLonInput || !minLatInput || !maxLatInput) return null;
     
@@ -122,7 +122,7 @@ function validateAndGetWKTFromInputs() {
         return null;
     }
     
-    // Retornar GeoJSON directamente en lugar de WKT
+    // Return GeoJSON directly instead of WKT
     const geoJson = {
         type: 'Polygon',
         coordinates: [[
@@ -133,15 +133,15 @@ function validateAndGetWKTFromInputs() {
             [minLon, minLat]
         ]]
     };
-    console.log("GeoJSON generado desde coordenadas:", JSON.stringify(geoJson));
+    console.log("GeoJSON generated from coordinates:", JSON.stringify(geoJson));
     return geoJson;
 }
 
-// --- Funciones de Mensajes ---
+// --- Message helpers ---
 function showMessage(message, type) {
     const g = document.getElementById('global-notification');
     if (g) {
-        // Map type to Bulma class
+        // Map message type to Bulma CSS class
         let cls = 'is-info';
         if (type === 'error') cls = 'is-danger';
         else if (type === 'success') cls = 'is-success';
@@ -177,9 +177,9 @@ function disableButtons(disable) {
     if (downloadBtn) downloadBtn.disabled = disable;
 }
 
-// ===== INICIALIZACIÓN CUANDO EL DOM ESTÁ LISTO =====
+// ===== INITIALISATION WHEN DOM IS READY =====
 document.addEventListener('DOMContentLoaded', function() {
-    // Inicializar elementos del DOM
+    // Initialise DOM element references
     lmvForm = document.getElementById('lmv-form');
     prepareBtn = document.getElementById('prepare-btn');
     resultMessage = document.getElementById('result-message');
@@ -203,21 +203,21 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentDownloadId = null;
     const stopBtn = document.getElementById('stop-download-btn');
 
-    // Inicializar el mapa
+    // Initialise the map
     initializeMap();
     
-    // Nota: localStorage y visibilidad de campos ahora manejados por inline script en lmv.html
-    
+    // Note: localStorage and field visibility are handled by the inline script in lmv.html
+
     // ===== EVENT LISTENERS =====
 
-    // Cargar colecciones dinámicamente desde el backend
+    // Load collections dynamically from the backend
     async function loadCollections() {
         try {
             const res = await fetch('/lmv/collections');
             const json = await res.json();
             if (!json.success || !Array.isArray(json.collections)) return;
 
-            // Limpiar y poblar
+            // Clear and populate the select element
             collectionSelect.innerHTML = '';
             const emptyOpt = document.createElement('option');
             emptyOpt.value = '';
@@ -230,7 +230,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const opt = document.createElement('option');
                 opt.value = col.id || col.collection || col.title || '';
                 opt.textContent = col.title || col.id || opt.value;
-                // Guardar licencia en data attr
+                // Store license in data attribute
                 if (col.license) opt.dataset.license = col.license;
                 collectionSelect.appendChild(opt);
             });
@@ -239,7 +239,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // Llamar al cargar la página
+    // Call on page load
     loadCollections();
 
     collectionSelect.addEventListener('change', () => {
@@ -252,11 +252,11 @@ document.addEventListener('DOMContentLoaded', function() {
             collectionLicenseDiv.style.display = 'none';
             collectionLicenseDiv.textContent = '';
         }
-        // Reset accept checkbox cuando cambia la colección
+        // Reset the accept checkbox when the collection changes
         acceptLicenseCheckbox.checked = false;
     });
     
-    // Event Listener principal del formulario
+    // Main form submit event listener
     lmvForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         clearMessages();
@@ -269,12 +269,12 @@ document.addEventListener('DOMContentLoaded', function() {
         const collectionId = document.getElementById('collection-select').value;
         if (authMethod === 'userpass') {
             if (!apiUsername) { showMessage('Vänligen ange ditt användarnamn.', 'error'); disableButtons(false); return; }
-            if (!apiKey) { showMessage('Vänligen ange din LMV STAC API Key.', 'error'); disableButtons(false); return; }
+            if (!apiKey) { showMessage('Ange systemkonto och lösenord.', 'error'); disableButtons(false); return; }
         } else {
             if (!apiToken) { showMessage('Vänligen ange din Auth token.', 'error'); disableButtons(false); return; }
         }
         if (!collectionId) { showMessage('Vänligen välj en datakollektion.', 'error'); disableButtons(false); return; }
-        // Verificar aceptación de licencia
+        // Check license acceptance
         const selOpt = collectionSelect.selectedOptions[0];
         const license = selOpt ? selOpt.dataset.license : null;
         if (license && !acceptLicenseCheckbox.checked) {
@@ -316,7 +316,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     body: JSON.stringify({ apiUsername: payload.apiUsername, apiKey: payload.apiKey, apiToken: payload.apiToken, collectionId: payload.collectionId, apiType: payload.apiType })
                 });
                 if (vres.status === 401 || vres.status === 403) {
-                    showMessage('Fel: Ogiltigt användarnamn eller API-nyckel. Kontrollera dina uppgifter.', 'error');
+                    showMessage('Fel: Ogiltigt systemkonto eller lösenord. Kontrollera dina uppgifter.', 'error');
                     return;
                 }
             } catch (e) {
@@ -330,7 +330,7 @@ document.addEventListener('DOMContentLoaded', function() {
             });
 
             if (res.status === 401 || res.status === 403) {
-                showMessage('Fel: Ogiltigt användarnamn eller API-nyckel. Kontrollera dina uppgifter.', 'error');
+                showMessage('Fel: Ogiltigt systemkonto eller lösenord. Kontrollera dina uppgifter.', 'error');
                 return;
             }
 
@@ -377,26 +377,36 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Event Listener para el botón de descarga (ya no se usa)
+    // Download button event listener (button kept for compatibility, directs user to the form)
     if (downloadBtn) {
         downloadBtn.addEventListener('click', async () => {
             showMessage('Använd formuläret ovan för att starta nedladdning.', 'info');
         });
     }
 
-    // Event Listener para el botón de descarga completa -> usar triggerDownload para permitir stop
+    // Full-country download button event listener — uses triggerDownload to allow cancellation
     fullDownloadBtn.addEventListener('click', async () => {
         console.log("Knappen 'Ladda ner hela Sverige' klickades.");
 
+        const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
         const apiUsername = document.getElementById('apiUsername').value.trim();
         const apiKey = document.getElementById('apiKey').value.trim();
+        const apiToken = document.getElementById('apiToken').value.trim();
         const collectionId = document.getElementById('collection-select').value;
 
-        if (!apiUsername || !apiKey || !collectionId) {
-            showMessage('Ange ditt användarnamn, API-nyckel och välj en samling innan du startar nedladdningen.', 'error');
+        if (authMethod === 'userpass' && (!apiUsername || !apiKey)) {
+            showMessage('Ange systemkonto och lösenord innan du startar nedladdningen.', 'error');
             return;
         }
-        // Verificar aceptación de licencia para descarga completa
+        if (authMethod === 'token' && !apiToken) {
+            showMessage('Ange din Auth token innan du startar nedladdningen.', 'error');
+            return;
+        }
+        if (!collectionId) {
+            showMessage('Välj en samling innan du startar nedladdningen.', 'error');
+            return;
+        }
+        // Check license acceptance for full-country download
         const selOpt = collectionSelect.selectedOptions[0];
         const license = selOpt ? selOpt.dataset.license : null;
         if (license && !acceptLicenseCheckbox.checked) {
@@ -427,6 +437,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const payload = {
             apiUsername: apiUsername,
             apiKey: apiKey,
+            apiToken: apiToken || undefined,
             collectionId: collectionId,
             apiType: 'vektor',
             geometry: geometry || null
@@ -435,4 +446,48 @@ document.addEventListener('DOMContentLoaded', function() {
         await triggerDownload(payload, fullDownloadBtn, '🚀 Starta nedladdning för hela Sverige');
         setTimeout(() => { disableButtons(false); }, 3000);
     });
+
+    // --- Diagnostic: test dl1 access ---
+    const diagBtn = document.getElementById('diag-test-btn');
+    const diagResult = document.getElementById('diag-result');
+    if (diagBtn) {
+        diagBtn.addEventListener('click', async () => {
+            const diagUrl = document.getElementById('diag-url').value.trim();
+            if (!diagUrl) { diagResult.textContent = 'Ange en URL att testa.'; diagResult.style.display = 'block'; return; }
+            const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
+            const apiUsername = document.getElementById('apiUsername').value.trim();
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const apiToken = document.getElementById('apiToken').value.trim();
+            diagBtn.disabled = true;
+            diagBtn.textContent = 'Testar...';
+            diagResult.style.display = 'none';
+            try {
+                const res = await fetch('/lmv/test-dl1', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: diagUrl, apiUsername: apiUsername || undefined, apiKey: apiKey || undefined, apiToken: apiToken || undefined })
+                });
+                const json = await res.json();
+                let out = `URL: ${json.url}\n\n`;
+                (json.results || []).forEach(r => {
+                    out += `[${r.method}] HTTP ${r.status ?? 'FEL'} ${r.error ? '→ ' + r.error : ''}`;
+                    if (r.contentLength) out += ` | Storlek: ${(parseInt(r.contentLength)/1024/1024).toFixed(1)} MB`;
+                    out += '\n';
+                });
+                if (json.success) {
+                    out += '\n✅ Åtkomst fungerar med en av metoderna ovan.';
+                } else {
+                    out += '\n❌ Ingen metod gav åtkomst (403/401 = inga rättigheter på detta dataset, kontakta Lantmäteriet).';
+                }
+                diagResult.textContent = out;
+                diagResult.style.display = 'block';
+            } catch (e) {
+                diagResult.textContent = 'Nätverksfel: ' + e.message;
+                diagResult.style.display = 'block';
+            } finally {
+                diagBtn.disabled = false;
+                diagBtn.textContent = 'Testa åtkomst';
+            }
+        });
+    }
 });

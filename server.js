@@ -23,7 +23,7 @@ const activeDownloads = new Map();
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static('public'));
 
-// --- CONFIGURACIÓN ---
+// --- CONFIGURATION ---
 const GDAL_ROOT = process.env.GDAL ? process.env.GDAL.trim() : null;
 const QGIS_ROOT = process.env.QGIS ? process.env.QGIS.trim() : null;
 const GDAL_BIN = QGIS_ROOT || GDAL_ROOT || '';
@@ -50,7 +50,7 @@ const GDAL_ADDO_CMD = path.join(
 );
 const PYTHON_CMD = QGIS_ROOT ? path.join(QGIS_ROOT, 'python-qgis-ltr.bat') : 'python';
 
-// --- UTILIDADES ---
+// --- UTILITIES ---
 const logFile = path.join(__dirname, 'process.log');
 function writeToLog(message) {
     const timestamp = new Date().toISOString();
@@ -59,7 +59,7 @@ function writeToLog(message) {
         fs.appendFileSync(logFile, logMessage);
         console.log(logMessage.trim());
     } catch (error) {
-        console.error("Fel vid skrivning i loggfilen:", error);
+        console.error("Error writing to log file:", error);
     }
 }
 
@@ -102,7 +102,7 @@ function runGdalInfo(rasterPath) {
             if (Number.isFinite(min) && Number.isFinite(max)) {
                 resolve({ min, max });
             } else {
-                reject(new Error('Kunde inte läsa statistik från gdalinfo.'));
+                reject(new Error('Could not read statistics from gdalinfo.'));
             }
         });
     });
@@ -110,7 +110,7 @@ function runGdalInfo(rasterPath) {
 
 function runGdalMerge(targetDir, tifFiles, outputName) {
     return new Promise((resolve, reject) => {
-        // Crear lista de archivos para evitar límite de línea de comando
+        // Create a file list to avoid command-line length limits
         const mergeListPath = path.join(targetDir, 'merge_list.txt');
         fs.writeFileSync(mergeListPath, tifFiles.join('\n'));
         
@@ -164,7 +164,7 @@ function runGdalAddo(targetDir, rasterPath) {
 
 function buildDynamicQml(minVal, maxVal, step = 5) {
     if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
-        throw new Error('Valores min/max inválidos para el estilo.');
+        throw new Error('Invalid min/max values for style generation.');
     }
 
     const start = Math.floor(minVal / step) * step;
@@ -188,7 +188,7 @@ function buildDynamicQml(minVal, maxVal, step = 5) {
                 ? `> ${stops[index - 1]}`
                 : `${stops[index - 1]} - ${value}`;
         return { value, color, label };
-    }).slice(1); // skip the synthetic first entry for label logic
+    }).slice(1); // Skip the synthetic first entry used only for label generation
 
     const itemsXml = items.map(item =>
         `          <item label="${item.label}" value="${item.value}" color="${item.color}" alpha="255"/>`
@@ -244,83 +244,45 @@ function slugify(text) {
 function normalizeGeometryPayload(rawGeometry) {
     if (!rawGeometry) return null;
     
-    // Si es string, intentar convertir de WKT a GeoJSON
+    // If it is a string, try to convert from WKT to GeoJSON
     if (typeof rawGeometry === 'string') {
         const geoJson = wktPolygonToGeoJSON(rawGeometry);
-        console.log('[normalizeGeometryPayload] WKT convertido a GeoJSON:', JSON.stringify(geoJson));
+        console.log('[normalizeGeometryPayload] WKT converted to GeoJSON:', JSON.stringify(geoJson));
         return geoJson;
     }
-    
-    // Si ya es objeto GeoJSON, validar y retornar
+
+    // If it is already a GeoJSON object, validate and return
     if (typeof rawGeometry === 'object' && rawGeometry.type && rawGeometry.coordinates) {
-        console.log('[normalizeGeometryPayload] GeoJSON recibido directamente:', JSON.stringify(rawGeometry));
+        console.log('[normalizeGeometryPayload] GeoJSON received directly:', JSON.stringify(rawGeometry));
         return rawGeometry;
     }
-    
-    console.warn('[normalizeGeometryPayload] Formato de geometría no reconocido:', typeof rawGeometry, rawGeometry);
+
+    console.warn('[normalizeGeometryPayload] Unrecognised geometry format:', typeof rawGeometry, rawGeometry);
     return null;
 }
 
-// --- VALIDACIÓN DE CREDENCIALES LMV ---
+// --- LMV CREDENTIAL VALIDATION ---
 async function validateLmvCredentials(apiUsername, apiKey, apiToken, apiType, collectionId) {
     const STAC_BASE = getStacBase(apiType);
 
-    // 1) Intentar obtener al menos un item de la colección para disponer de un asset a chequear
+    // 1) STAC search: 200 → token valid, 401/403 → token invalid
     try {
         const searchUrl = `${STAC_BASE}/search`;
         const body = { collections: [collectionId], limit: 1 };
-        // Construir headers: preferir apiToken (Bearer) si se proporcionó, si no usar X-API-Key
         const headers = {};
-        if (apiKey) headers['X-API-Key'] = apiKey;
-        if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
-        const searchRes = await axios.post(searchUrl, body, { headers, timeout: 10000 });
-        const features = (searchRes.data && searchRes.data.features) || [];
-        if (features.length > 0) {
-            const item = features[0];
-            const assetKey = item.assets ? Object.keys(item.assets)[0] : null;
-            const asset = assetKey ? item.assets[assetKey] : null;
-            if (asset && asset.href) {
-                // Construir URL absoluta si es relativa
-                let assetUrl = asset.href;
-                const selfLink = item.links ? item.links.find(l => l.rel === 'self') : null;
-                if (selfLink && selfLink.href && !asset.href.startsWith('http')) {
-                    assetUrl = new URL(asset.href, selfLink.href).href;
-                }
-
-                try {
-                    // Intentar una GET parcial (Range) para forzar comprobación de permisos sin descargar todo
-                    // Preparar headers para el GET parcial
-                    const getHeaders = { 'Range': 'bytes=0-1023' };
-                    if (apiKey) getHeaders['X-API-Key'] = apiKey;
-                    if (apiToken) getHeaders['Authorization'] = `Bearer ${apiToken}`;
-                    const getAuth = (apiUsername && apiKey && !apiToken) ? { username: apiUsername, password: apiKey } : undefined;
-                    const getRes = await axios.get(assetUrl, {
-                        headers: getHeaders,
-                        auth: getAuth,
-                        timeout: 10000,
-                        responseType: 'stream',
-                        maxRedirects: 5,
-                        validateStatus: s => true
-                    });
-                    if (getRes.status === 401 || getRes.status === 403) {
-                        return { ok: false, status: getRes.status, message: 'Unauthorized when trying to fetch asset' };
-                    }
-                    // 200/206/3xx are considered valid
-                    return { ok: true, status: getRes.status };
-                } catch (getErr) {
-                    const status = getErr.response ? getErr.response.status : null;
-                    try {
-                        const respBody = getErr.response && getErr.response.data ? JSON.stringify(getErr.response.data).slice(0,800) : getErr.message;
-                        writeToLog(`[VALIDATION] Asset GET failed for collection=${collectionId} apiType=${apiType} status=${status} detail=${respBody}`);
-                    } catch (e) {
-                        writeToLog(`[VALIDATION] Asset GET failed for collection=${collectionId} apiType=${apiType} status=${status} (could not stringify response)`);
-                    }
-                    return { ok: false, status, message: getErr.message };
-                }
-            }
+        const validateConfig = { headers, timeout: 10000 };
+        if (apiToken) {
+            headers['Authorization'] = `Bearer ${apiToken}`;
+        } else if (apiUsername && apiKey) {
+            // Basic Auth (X-API-Key is no longer supported by LMV)
+            validateConfig.auth = { username: apiUsername, password: apiKey };
+        } else if (apiKey) {
+            headers['X-API-Key'] = apiKey;
         }
+        const searchRes = await axios.post(searchUrl, body, validateConfig);
+        // A 200 response (regardless of hit count) confirms the token is accepted by the STAC API
+        return { ok: true, status: searchRes.status };
     } catch (err) {
-        // Si la búsqueda falla con 401/403 interpretarlo como credenciales inválidas
         const status = err.response ? err.response.status : null;
         try {
             const respBody = err.response && err.response.data ? JSON.stringify(err.response.data).slice(0,800) : err.message;
@@ -329,21 +291,22 @@ async function validateLmvCredentials(apiUsername, apiKey, apiToken, apiType, co
             writeToLog(`[VALIDATION] Search failed for collection=${collectionId} apiType=${apiType} status=${status} (could not stringify response)`);
         }
         if (status === 401 || status === 403) return { ok: false, status, message: err.message };
-        // En otros errores, continuar con comprobación por collections como fallback
+        // Other errors (network error, unknown collection, etc.) → fall back
     }
 
-    // Fallback: intentar acceder al endpoint de collections (si no había items)
+    // Fallback: try the collections endpoint (e.g. when the collection has no items)
     try {
         const testUrl = `${STAC_BASE}/collections`;
         const colHeaders = {};
-        if (apiKey) colHeaders['X-API-Key'] = apiKey;
-        if (apiToken) colHeaders['Authorization'] = `Bearer ${apiToken}`;
-        const colAuth = (apiUsername && apiKey && !apiToken) ? { username: apiUsername, password: apiKey } : undefined;
-        const res = await axios.get(testUrl, {
-            headers: colHeaders,
-            auth: colAuth,
-            timeout: 10000
-        });
+        const colConfig = { headers: colHeaders, timeout: 10000 };
+        if (apiToken) {
+            colHeaders['Authorization'] = `Bearer ${apiToken}`;
+        } else if (apiUsername && apiKey) {
+            colConfig.auth = { username: apiUsername, password: apiKey };
+        } else if (apiKey) {
+            colHeaders['X-API-Key'] = apiKey;
+        }
+        const res = await axios.get(testUrl, colConfig);
         return { ok: true, status: res.status };
     } catch (err) {
         const status = err.response ? err.response.status : null;
@@ -357,21 +320,21 @@ async function validateLmvCredentials(apiUsername, apiKey, apiToken, apiType, co
     }
 }
 
-// --- RUTAS GBIF/ARTDATA ---
+// --- GBIF/ARTDATA ROUTES ---
 
-// Endpoint para verificar si una especie existe en GBIF
+// Endpoint: check whether a species exists in GBIF
 app.post('/check-species', async (req, res) => {
     const { username, password, speciesName } = req.body;
     
     if (!username || !password || !speciesName) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Faltan parámetros: username, password y speciesName son requeridos' 
+        return res.status(400).json({
+            success: false,
+            error: 'Missing parameters: username, password and speciesName are required'
         });
     }
 
     try {
-        // Sök art i GBIF Species API
+        // Search for the species in the GBIF Species API
         const searchUrl = `https://api.gbif.org/v1/species/match?name=${encodeURIComponent(speciesName)}`;
         const response = await axios.get(searchUrl, {
             auth: { username, password }
@@ -393,44 +356,43 @@ app.post('/check-species', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('Fel vid verifiering av art:', error.message);
+        console.error('Error verifying species:', error.message);
         res.status(500).json({
             success: false,
-            error: 'Fel vid verifiering av art i GBIF',
+            error: 'Error verifying species in GBIF',
             details: error.message
         });
     }
 });
 
-// Endpoint para obtener el conteo de ocurrencias en GBIF
+// Endpoint: get the occurrence count for a species in GBIF
 app.post('/get-occurrence-count', async (req, res) => {
     const { username, password, speciesKey, geometry, basisOfRecord } = req.body;
     
     if (!username || !password || !speciesKey) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Saknas parametrar: username, password och speciesKey krävs' 
+        return res.status(400).json({
+            success: false,
+            error: 'Missing parameters: username, password and speciesKey are required'
         });
     }
 
     try {
-        // Construir URL de búsqueda de ocurrencias
+        // Build the occurrence search URL
         let searchUrl = 'https://api.gbif.org/v1/occurrence/search?limit=0';
-        
-        // Agregar taxonKey (o ALL)
+
+        // Add taxonKey (or ALL)
         if (speciesKey !== 'ALL') {
             searchUrl += `&taxonKey=${speciesKey}`;
         }
-        
-        // Agregar basisOfRecord si está especificado
+
+        // Add basisOfRecord if specified
         if (basisOfRecord) {
             searchUrl += `&basisOfRecord=${basisOfRecord}`;
         }
-        
-        // Agregar geometría si está especificada
+
+        // Add geometry if specified
         if (geometry) {
-            // Convertir WKT a bbox o geometry parameter
-            // GBIF acepta geometry en formato WKT
+            // GBIF accepts geometry in WKT format
             const wktString = typeof geometry === 'string' ? geometry : JSON.stringify(geometry);
             searchUrl += `&geometry=${encodeURIComponent(wktString)}`;
         }
@@ -447,32 +409,32 @@ app.post('/get-occurrence-count', async (req, res) => {
         } else {
             res.json({
                 success: false,
-                error: 'No se pudo obtener el conteo de ocurrencias'
+                error: 'Could not retrieve occurrence count'
             });
         }
     } catch (error) {
-        console.error('Fel vid hämtning av förekomstantal:', error.message);
+        console.error('Error fetching occurrence count:', error.message);
         res.status(500).json({
             success: false,
-            error: 'Fel vid hämtning av förekomstantal från GBIF',
+            error: 'Error fetching occurrence count from GBIF',
             details: error.message
         });
     }
 });
 
-// Endpoint para crear una descarga en GBIF
+// Endpoint: create a download request in GBIF
 app.post('/create-download', async (req, res) => {
     const { username, password, speciesKey, geometry, basisOfRecord } = req.body;
     
     if (!username || !password || !speciesKey || !geometry) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Saknas obligatoriska parametrar' 
+        return res.status(400).json({
+            success: false,
+            error: 'Missing required parameters'
         });
     }
 
     try {
-        // Construir el predicado de descarga de GBIF
+        // Build the GBIF download predicate
         const downloadRequest = {
             creator: username,
             notificationAddresses: [username],
@@ -484,7 +446,7 @@ app.post('/create-download', async (req, res) => {
             }
         };
 
-        // Agregar filtro de especie
+        // Add species filter
         if (speciesKey !== 'ALL') {
             downloadRequest.predicate.predicates.push({
                 type: "equals",
@@ -493,7 +455,7 @@ app.post('/create-download', async (req, res) => {
             });
         }
 
-        // Agregar filtro de basisOfRecord
+        // Add basisOfRecord filter
         if (basisOfRecord) {
             downloadRequest.predicate.predicates.push({
                 type: "equals",
@@ -502,7 +464,7 @@ app.post('/create-download', async (req, res) => {
             });
         }
 
-        // Agregar filtro de geometría
+        // Add geometry filter
         if (geometry) {
             downloadRequest.predicate.predicates.push({
                 type: "within",
@@ -510,12 +472,12 @@ app.post('/create-download', async (req, res) => {
             });
         }
 
-        // Simplificar si solo hay un predicado
+        // Simplify to a single predicate when only one filter was added
         if (downloadRequest.predicate.predicates.length === 1) {
             downloadRequest.predicate = downloadRequest.predicate.predicates[0];
         }
 
-        // Crear la descarga en GBIF
+        // Submit the download request to GBIF
         const response = await axios.post(
             'https://api.gbif.org/v1/occurrence/download/request',
             downloadRequest,
@@ -532,18 +494,18 @@ app.post('/create-download', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Fel vid skapande av nedladdning:', error.message);
+        console.error('Error creating download:', error.message);
         res.status(500).json({
             success: false,
-            error: 'Fel vid skapande av nedladdning i GBIF',
+            error: 'Error creating download in GBIF',
             details: error.response?.data || error.message
         });
     }
 });
 
-// --- RUTAS DE COLECCIONES ---
+// --- COLLECTIONS ROUTES ---
 
-// Ruta original para Vektor (usada por lmv.html)
+// Vector collections route (used by lmv.html)
 app.get('/lmv/collections', async (req, res) => {
     try {
         const response = await axios.get('https://api.lantmateriet.se/stac-vektor/v1/collections');
@@ -553,13 +515,13 @@ app.get('/lmv/collections', async (req, res) => {
     }
 });
 
-// NUEVA Ruta para Höjd (usada por lmv_hojd.html)
+// Height data collections route (used by lmv_hojd.html)
 app.get('/lmv/hojd/collections', async (req, res) => {
     try {
         const apiKey = req.headers['x-api-key'];
         const authHeader = req.headers['authorization'];
         if (!apiKey && !authHeader) {
-            return res.status(401).json({ success: false, error: 'API Key requerida en el header X-API-Key o Authorization: Bearer <token>' });
+            return res.status(401).json({ success: false, error: 'API Key required in header X-API-Key or Authorization: Bearer <token>' });
         }
 
         const headers = {};
@@ -578,18 +540,60 @@ app.get('/lmv/hojd/collections', async (req, res) => {
 app.get('/lmv/lan', (req, res) => {
     fs.readFile(LAN_GEOJSON_PATH, 'utf8', (err, data) => {
         if (err) {
-            return res.status(500).json({ success: false, error: 'Kunde inte läsa län-data.' });
+            return res.status(500).json({ success: false, error: 'Could not read county data.' });
         }
         try {
             const json = JSON.parse(data);
             res.json({ success: true, data: json });
         } catch (parseErr) {
-            res.status(500).json({ success: false, error: 'Län-GeoJSON är ogiltig.' });
+            res.status(500).json({ success: false, error: 'County GeoJSON is invalid.' });
         }
     });
 });
 
-// --- LÓGICA DE DESCARGA ---
+// --- DOWNLOAD LOGIC ---
+
+// Manually follows HTTP redirects to preserve the Authorization header
+// (axios strips auth headers automatically on cross-domain redirects)
+async function downloadWithRedirects(url, headers, auth, timeout = 60000) {
+    let currentUrl = url;
+    for (let i = 0; i < 10; i++) {
+        const agent = new http.Agent({ keepAlive: false });
+        const res = await axios({
+            method: 'GET',
+            url: currentUrl,
+            responseType: 'stream',
+            httpAgent: agent,
+            timeout,
+            headers,
+            auth,
+            maxRedirects: 0,
+            validateStatus: s => true
+        });
+        if (res.status >= 300 && res.status < 400 && res.headers.location) {
+            res.data.destroy();
+            currentUrl = new URL(res.headers.location, currentUrl).href;
+            continue;
+        }
+        if (res.status >= 400) {
+            let body = '';
+            try {
+                const chunks = [];
+                for await (const chunk of res.data) {
+                    chunks.push(Buffer.from(chunk));
+                    if (Buffer.concat(chunks).length > 800) break;
+                }
+                body = Buffer.concat(chunks).toString('utf8');
+            } catch (e) { body = '(could not read response body)'; }
+            writeToLog(`[DOWNLOAD] ${res.status} from ${currentUrl} | auth-header: ${headers['Authorization'] ? headers['Authorization'].substring(0,20)+'...' : 'none'} | basic-auth: ${auth ? auth.username : 'none'} | body: ${body.substring(0,400)}`);
+            const err = new Error(`Request failed with status code ${res.status}`);
+            err.response = { status: res.status };
+            throw err;
+        }
+        return res;
+    }
+    throw new Error('Too many redirects');
+}
 
 async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, abortSignal = null) {
     const STAC_BASE = getStacBase(apiType);
@@ -605,17 +609,17 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
             const existingTifs = fs.readdirSync(downloadFolderName)
                 .filter(name => name.toLowerCase().endsWith('.tif') || name.toLowerCase().endsWith('.tiff'));
             if (existingTifs.length > 0) {
-                writeToLog(`[${collectionId}] Mappen finns redan (${downloadFolderName}) med ${existingTifs.length} raster. Hoppar över ny nedladdning.`);
+                writeToLog(`[${collectionId}] Folder already exists (${downloadFolderName}) with ${existingTifs.length} rasters. Skipping new download.`);
                 return;
             }
         } catch (err) {
-            console.warn(`[${collectionId}] Kunde inte inspektera befintlig mapp: ${err.message}`);
+            console.warn(`[${collectionId}] Could not inspect existing folder: ${err.message}`);
         }
     }
     const maxRetries = 5;
     
-    // CAMBIO 1: Ahora guardamos objetos completos, no solo URLs
-    let downloadQueue = []; 
+    // Full item objects are stored in the queue, not just URLs
+    let downloadQueue = [];
     
     let searchRequestBody = { collections: [collectionId], limit: 1000 };
     
@@ -623,31 +627,39 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         const geoJson = normalizeGeometryPayload(geometry);
         if (geoJson) {
             searchRequestBody.intersects = geoJson;
-            writeToLog(`[${collectionId}] Búsqueda con geometría: ${JSON.stringify(geoJson)}`);
+            writeToLog(`[${collectionId}] Search with geometry: ${JSON.stringify(geoJson)}`);
         } else {
-            console.warn(`[${collectionId}] Geometría inválida ignorada.`);
-            writeToLog(`[${collectionId}] Geometría inválida ignorada: ${JSON.stringify(geometry)}`);
+            console.warn(`[${collectionId}] Invalid geometry ignored.`);
+            writeToLog(`[${collectionId}] Invalid geometry ignored: ${JSON.stringify(geometry)}`);
         }
     } else {
-        writeToLog(`[${collectionId}] Búsqueda sin filtro geométrico (toda Suecia).`);
+        writeToLog(`[${collectionId}] Search without geometry filter (all of Sweden).`);
     }
 
     let nextUrl = `${STAC_BASE}/search`;
-    writeToLog(`[${collectionId}] (${apiType}) Startar sökning/paginering...`);
+    writeToLog(`[${collectionId}] (${apiType}) Starting search/pagination...`);
 
-    // 1. PAGINACIÓN
+    // 1. PAGINATION
     while (nextUrl) {
         if (abortSignal && abortSignal.aborted) {
-            writeToLog(`[${collectionId}] Nedladdning avbröts av användaren.`);
+            writeToLog(`[${collectionId}] Download cancelled by user.`);
             return;
         }
         try {
             const headers = { 'Content-Type': 'application/json' };
-            if (apiKey) headers['X-API-Key'] = apiKey;
-            if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
             const config = { headers };
+            if (apiToken) {
+                // Token mode: Bearer token for STAC search
+                headers['Authorization'] = `Bearer ${apiToken}`;
+            } else if (apiUsername && apiKey) {
+                // Userpass mode: Basic Auth for STAC search (X-API-Key no longer supported by LMV)
+                config.auth = { username: apiUsername, password: apiKey };
+            } else if (apiKey) {
+                // Fallback: try X-API-Key when only a key is available
+                headers['X-API-Key'] = apiKey;
+            }
             let response;
-            
+
             if (nextUrl === `${STAC_BASE}/search`) {
                 response = await axios.post(nextUrl, searchRequestBody, config);
             } else {
@@ -655,10 +667,10 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
             }
 
             const items = response.data.features || [];
-            writeToLog(`[${collectionId}] Sida mottagen: ${items.length} objekt hittades.`);
+            writeToLog(`[${collectionId}] Page received: ${items.length} items found.`);
             items.forEach(item => {
                 if (!item.assets) {
-                    writeToLog(`[${collectionId}] Objekt utan assets: ${item.id || 'utan ID'}`);
+                    writeToLog(`[${collectionId}] Item without assets: ${item.id || 'no ID'}`);
                     return;
                 }
                 
@@ -669,12 +681,12 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
 
                     const hrefLower = asset.href.toLowerCase();
                     
-                    // Para datos vectoriales: aceptar gpkg, geojson, gml, shp
-                    const isVector = hrefLower.endsWith('.gpkg') || hrefLower.endsWith('.geojson') || 
+                    // Vector data: accept gpkg, geojson, gml, shp
+                    const isVector = hrefLower.endsWith('.gpkg') || hrefLower.endsWith('.geojson') ||
                                     hrefLower.endsWith('.gml') || hrefLower.endsWith('.zip') ||
                                     hrefLower.includes('.gpkg?') || hrefLower.includes('.geojson?');
-                    
-                    // Para datos raster: aceptar tif/tiff
+
+                    // Raster data: accept tif/tiff
                     const isRaster = hrefLower.endsWith('.tif') || hrefLower.endsWith('.tiff');
                     
                     if (!isVector && !isRaster) return;
@@ -696,7 +708,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                 });
                 
                 if (assetsFound === 0) {
-                    writeToLog(`[${collectionId}] Objekt ${item.id || 'utan ID'} har inga nedladdningsbara assets. Tillgängliga assets: ${Object.keys(item.assets).join(', ')}`);
+                    writeToLog(`[${collectionId}] Item ${item.id || 'no ID'} has no downloadable assets. Available assets: ${Object.keys(item.assets).join(', ')}`);
                 }
             });
 
@@ -707,34 +719,34 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
 
         } catch (error) {
             if (error.response && error.response.status === 429) {
-                writeToLog(`[${collectionId}] Rate limit (429) vid paginering. Väntar 10s...`);
+                writeToLog(`[${collectionId}] Rate limit (429) during pagination. Waiting 10s...`);
                 await delay(10000);
-                continue; 
+                continue;
             }
-            writeToLog(`[${collectionId}] Fel vid paginering: ${error.message}. Avbryter sökning.`);
+            writeToLog(`[${collectionId}] Error during pagination: ${error.message}. Aborting search.`);
             nextUrl = null;
         }
     }
 
-    // Ta bort dubbletter baserat på URL
+    // Remove duplicates based on URL
     downloadQueue = downloadQueue.filter((v,i,a)=>a.findIndex(t=>(t.url===v.url))===i);
 
     if (downloadQueue.length > 0) {
-        writeToLog(`[${collectionId}] KLART! Hittade ${downloadQueue.length} filer att ladda ner.`);
+        writeToLog(`[${collectionId}] Done! Found ${downloadQueue.length} files to download.`);
     } else {
-        writeToLog(`[${collectionId}] Inga resultat för given geometri. Fortsätter med nästa samling.`);
+        writeToLog(`[${collectionId}] No results for the given geometry. Continuing with the next collection.`);
         return;
     }
 
     if (!folderAlreadyExists) fs.mkdirSync(downloadFolderName, { recursive: true });
 
-    // Array para guardar las features del GeoJSON final
+    // Array to hold features for the final tile index GeoJSON
     let tileIndexFeatures = [];
 
-    // 2. DESCARGA
+    // 2. DOWNLOAD
     for (let i = 0; i < downloadQueue.length; i++) {
         if (abortSignal && abortSignal.aborted) {
-            writeToLog(`[${collectionId}] Descarga cancelada por el usuario.`);
+            writeToLog(`[${collectionId}] Download cancelled by user.`);
             return;
         }
         const itemData = downloadQueue[i];
@@ -745,30 +757,62 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         await delay(1000); 
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            let bearerFallbackAttempted = false;
             try {
                 if (!fs.existsSync(filePath)) {
-                    const httpAgent = new http.Agent({ keepAlive: false });
                     const downloadHeaders = {};
-                    if (apiKey) downloadHeaders['X-API-Key'] = apiKey;
-                    if (apiToken) downloadHeaders['Authorization'] = `Bearer ${apiToken}`;
-                    const downloadAuth = (apiUsername && apiKey && !apiToken) ? { username: apiUsername, password: apiKey } : undefined;
-                    const response = await axios({
-                        method: 'GET', url, responseType: 'stream', httpAgent, timeout: 60000,
-                        headers: downloadHeaders,
-                        auth: downloadAuth
-                    });
+                    let downloadAuth = undefined;
+                    let dlMethod = '';
+                    if (apiToken) {
+                        // Token mode: try Bearer first against dl1.
+                        // Some dataset paths on dl1 reject Bearer (401) even though the
+                        // STAC catalogue accepts it — in that case we fall back to
+                        // Basic Auth (Geotorget) automatically if credentials are available.
+                        downloadHeaders['Authorization'] = `Bearer ${apiToken}`;
+                        dlMethod = 'Bearer token';
+                    } else if (apiUsername && apiKey) {
+                        // Userpass mode: Geotorget system account → Basic Auth against dl1
+                        downloadAuth = { username: apiUsername, password: apiKey };
+                        dlMethod = `Basic Auth (${apiUsername})`;
+                    } else if (apiKey) {
+                        downloadHeaders['X-API-Key'] = apiKey;
+                        dlMethod = 'X-API-Key';
+                    }
+                    writeToLog(`[DOWNLOAD] Attempting ${url} | method: ${dlMethod}`);
+
+                    let response;
+                    try {
+                        response = await downloadWithRedirects(url, downloadHeaders, downloadAuth, 60000);
+                    } catch (firstErr) {
+                        // Bearer → Basic Auth fallback:
+                        // dl1 sometimes rejects Bearer (401) for specific dataset paths
+                        // even when the same token works fine for the STAC catalogue.
+                        // If Geotorget credentials are available, retry immediately with Basic Auth.
+                        const firstStatus = firstErr.response ? firstErr.response.status : null;
+                        if (firstStatus === 401 && apiToken && apiUsername && apiKey) {
+                            writeToLog(`[DOWNLOAD] Bearer rejected (401) for ${filename} — falling back to Basic Auth (${apiUsername})...`);
+                            // Remove any partial file left by the failed attempt
+                            if (fs.existsSync(filePath)) try { fs.unlinkSync(filePath); } catch (e) {}
+                            bearerFallbackAttempted = true;
+                            response = await downloadWithRedirects(url, {}, { username: apiUsername, password: apiKey }, 60000);
+                            writeToLog(`[DOWNLOAD] Basic Auth fallback succeeded for ${filename}`);
+                        } else {
+                            throw firstErr; // Re-throw for standard error handling in the outer catch
+                        }
+                    }
+
                     const writer = fs.createWriteStream(filePath);
                     response.data.pipe(writer);
                     await new Promise((resolve, reject) => {
                         writer.on('finish', resolve);
                         writer.on('error', reject);
                     });
-                    console.log(`[${i+1}/${downloadQueue.length}] Nedladdad: ${filename}`);
+                    console.log(`[${i+1}/${downloadQueue.length}] Downloaded: ${filename}`);
                 } else {
-                    console.log(`[${i+1}/${downloadQueue.length}] Finns redan: ${filename}`);
+                    console.log(`[${i+1}/${downloadQueue.length}] Already exists: ${filename}`);
                 }
 
-                // Si es ZIP, descomprimimos
+                // If the file is a ZIP, extract it
                 if (filename.toLowerCase().endsWith('.zip')) {
                     await fs.createReadStream(filePath)
                         .pipe(unzipper.Extract({ path: downloadFolderName }))
@@ -776,8 +820,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                     try { fs.unlinkSync(filePath); } catch(e){}
                 }
 
-                // CAMBIO 3: Preparar Feature para el Tile Index
-                // Solo si tenemos bbox válido
+                // Build a Feature for the Tile Index, only when we have a valid bbox
                 if (itemData.bbox && itemData.bbox.length === 4) {
                     const [minx, miny, maxx, maxy] = itemData.bbox;
                     tileIndexFeatures.push({
@@ -785,8 +828,8 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                         properties: {
                             id: itemData.id,
                             filename: filename,
-                            // Ruta relativa para que QGIS la encuentre fácil si mueves la carpeta
-                            location: `./${filename}` 
+                            // Relative path so QGIS can find the file if the folder is moved
+                            location: `./${filename}`
                         },
                         geometry: {
                             type: "Polygon",
@@ -801,21 +844,37 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                     });
                 }
 
-                break; 
+                break;
             } catch (error) {
-                if (error.response && error.response.status === 429) {
+                const status = error.response ? error.response.status : null;
+                if (status === 401) {
+                    // 401 = auth rejected by dl1. Retrying won't help — bail out immediately.
+                    const hint = bearerFallbackAttempted
+                        ? `Both Bearer token and Basic Auth (${apiUsername}) rejected by dl1 for this file. Check Geotorget subscription.`
+                        : apiToken
+                            ? 'Bearer token rejected by dl1. Add Geotorget credentials (systemkonto + lösenord) to enable automatic fallback.'
+                            : 'Invalid credentials for dl1. Check your Geotorget account and dataset subscription.';
+                    writeToLog(`[DOWNLOAD] 401 – skipping ${filename}: ${hint}`);
+                    console.warn(`[${collectionId}] 401 – skipping ${filename}: ${hint}`);
+                    break; // Do not retry
+                } else if (status === 403) {
+                    // 403 = authenticated but no subscription for this dataset.
+                    writeToLog(`[DOWNLOAD] 403 – skipping ${filename}: account has no subscription for this dataset in Geotorget.`);
+                    console.warn(`[${collectionId}] 403 – skipping ${filename}: no dataset subscription in Geotorget.`);
+                    break; // Do not retry
+                } else if (status === 429) {
                     const waitTime = 30000;
-                    console.warn(`[${collectionId}] 429 Rate Limit. Esperando ${waitTime/1000}s...`);
+                    console.warn(`[${collectionId}] 429 Rate Limit. Waiting ${waitTime/1000}s...`);
                     await delay(waitTime);
                 } else {
-                    console.warn(`[${collectionId}] Fel vid nedladdning ${filename}: ${error.message}. Försök ${attempt}/${maxRetries}`);
+                    console.warn(`[${collectionId}] Error downloading ${filename}: ${error.message}. Attempt ${attempt}/${maxRetries}`);
                     await delay(2000 * attempt);
                 }
             }
         }
     }
 
-    // CAMBIO 4: Generar archivo tile_index.geojson
+    // Generate tile_index.geojson
     if (tileIndexFeatures.length > 0) {
         const geoJSON = {
             type: "FeatureCollection",
@@ -827,102 +886,100 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         const indexFile = path.join(downloadFolderName, 'tile_index.geojson');
         try {
             fs.writeFileSync(indexFile, JSON.stringify(geoJSON, null, 2));
-            writeToLog(`[${collectionId}] Tile Index genererat: ${indexFile}`);
+            writeToLog(`[${collectionId}] Tile index generated: ${indexFile}`);
         } catch (err) {
-            console.error(`Error escribiendo tile index: ${err.message}`);
+            console.error(`Error writing tile index: ${err.message}`);
         }
     }
 
-    // POST-PROCESAMIENTO: Merge + Overviews + VRT + Estilo
+    // POST-PROCESSING: Merge + Overviews + VRT + Style
     try {
         const tifFiles = fs.readdirSync(downloadFolderName)
             .filter(name => name.toLowerCase().endsWith('.tif') || name.toLowerCase().endsWith('.tiff'))
             .sort();
 
         if (tifFiles.length > 0) {
-            writeToLog(`[${collectionId}] Startar efterbearbetning: sammanslagning av ${tifFiles.length} tiles...`);
+            writeToLog(`[${collectionId}] Starting post-processing: merging ${tifFiles.length} tiles...`);
             
             const mergedFileName = `merged_${vrtBaseName}.tif`;
             const mergedPath = path.join(downloadFolderName, mergedFileName);
             
             try {
-                // 1. Merge todos los tiles en un solo GeoTIFF
+                // 1. Merge all tiles into a single GeoTIFF
                 await runGdalMerge(downloadFolderName, tifFiles, mergedFileName);
-                writeToLog(`[${collectionId}] Sammanfogning klar: ${mergedFileName}`);
-                
-                // 2. Remover tiles originales
-                writeToLog(`[${collectionId}] Tar bort ${tifFiles.length} ursprungliga tiles...`);
+                writeToLog(`[${collectionId}] Merge complete: ${mergedFileName}`);
+
+                // 2. Remove the original tiles
+                writeToLog(`[${collectionId}] Removing ${tifFiles.length} original tiles...`);
                 tifFiles.forEach(file => {
                     try {
                         fs.unlinkSync(path.join(downloadFolderName, file));
                     } catch (e) {
-                        console.warn(`Kunde inte ta bort ${file}: ${e.message}`);
+                        console.warn(`Could not remove ${file}: ${e.message}`);
                     }
                 });
                 
-                // 3. Construir overviews (pirámides)
-                writeToLog(`[${collectionId}] Skapar översiktsnivåer (gdaladdo -r average)...`);
+                // 3. Build overviews (pyramids)
+                writeToLog(`[${collectionId}] Building overview levels (gdaladdo -r average)...`);
                 await runGdalAddo(downloadFolderName, mergedFileName);
-                writeToLog(`[${collectionId}] Översikter färdiga.`);
-                
-                // 4. Generar VRT apuntando al merged
+                writeToLog(`[${collectionId}] Overviews complete.`);
+
+                // 4. Generate VRT pointing to the merged file
                 const listPath = path.join(downloadFolderName, 'filelist.txt');
                 fs.writeFileSync(listPath, mergedFileName);
                 await runGdalBuildVrt(downloadFolderName, 'filelist.txt', vrtFileName);
-                writeToLog(`[${collectionId}] VRT genererat: ${vrtFileName}`);
-                
-                // 5. Generar estilo dinámico
+                writeToLog(`[${collectionId}] VRT generated: ${vrtFileName}`);
+
+                // 5. Generate dynamic style
                 try {
                     const stats = await runGdalInfo(mergedPath);
                     const qmlContent = buildDynamicQml(stats.min, stats.max, 5);
                     const qmlPath = path.join(downloadFolderName, `${vrtFileName}.qml`);
                     fs.writeFileSync(qmlPath, qmlContent, 'utf8');
-                    writeToLog(`[${collectionId}] Dynamisk stil applicerad (intervall om 5 enheter).`);
+                    writeToLog(`[${collectionId}] Dynamic style applied (5-unit intervals).`);
                 } catch (styleErr) {
-                    console.warn(`[${collectionId}] Kunde inte generera stil: ${styleErr.message}`);
+                    console.warn(`[${collectionId}] Could not generate style: ${styleErr.message}`);
                 }
             } catch (postErr) {
-                console.warn(`[${collectionId}] Fel i efterbearbetning: ${postErr.message}`);
+                console.warn(`[${collectionId}] Error in post-processing: ${postErr.message}`);
             }
         }
     } catch (vrtErr) {
-        console.error(`Det gick inte att förbereda efterbearbetning för ${collectionId}: ${vrtErr.message}`);
+        console.error(`Could not prepare post-processing for ${collectionId}: ${vrtErr.message}`);
     }
 
-    writeToLog(`[${collectionId}] Processen slutförd.`);
+    writeToLog(`[${collectionId}] Process complete.`);
 }
 
-// --- RUTA DE INICIO DE DESCARGA ---
+// --- DOWNLOAD START ROUTE ---
 app.post('/lmv/start-full-download', async (req, res) => {
     const { apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel } = req.body;
 
-    // Standardvärde: om apiType saknas används 'vektor' (bakåtkompatibilitet)
+    // Default: if apiType is missing, use 'vektor' (backwards compatibility)
     const type = apiType || 'vektor';
 
     // Accept either apiKey or apiToken when using token-based auth
     if (!(apiKey || apiToken) || !collectionId) return res.status(400).json({ success: false, error: 'Saknas data.' });
 
-    // Validar credenciales antes de iniciar cualquier proceso en background
+    // Validate credentials before starting any background process
     try {
         const valid = await validateLmvCredentials(apiUsername, apiKey, apiToken, type, collectionId);
         if (!valid.ok) {
             const status = valid.status || 401;
-            writeToLog(`[VALIDATION] Felaktiga LMV-uppgifter (status: ${status}). Avbryter start.`);
+            writeToLog(`[VALIDATION] Invalid LMV credentials (status: ${status}). Aborting start.`);
             return res.status(401).json({ success: false, error: 'Ogiltigt användarnamn eller API-nyckel mot Lantmäteriet. Kontrollera dina uppgifter.' });
         }
     } catch (e) {
-        writeToLog(`[VALIDATION] Fel vid validering av LMV-uppgifter: ${e.message}`);
+        writeToLog(`[VALIDATION] Error validating LMV credentials: ${e.message}`);
         return res.status(502).json({ success: false, error: 'Fel vid kontakt med LMV API. Försök senare.' });
     }
 
-    // Crear identificador y controlador solo después de validar
+    // Create identifier and controller only after successful validation
     const downloadId = `${type}_${collectionId}_${geometryLabel || 'default'}_${Date.now()}`;
     const abortController = new AbortController();
     activeDownloads.set(downloadId, abortController);
 
-    // LÓGICA ESPECIAL: Descargar TODAS las Markhöjdmodell
-        // ...existing code...
-        // LÓGICA ESPECIAL: Descargar TODAS las Markhöjdmodell (o filtrar por área en todas)
+    // Special case: download ALL Markhöjdmodell collections (or filter by area across all of them)
         if (type === 'hojd' && collectionId === 'ALL_MARKHOJD') {
             
             let msg = 'Söker Markhöjdmodell-data... (Detta kan ta några minuter)';
@@ -940,29 +997,29 @@ app.post('/lmv/start-full-download', async (req, res) => {
                         col.id.toLowerCase().includes('markhojd') || col.title.toLowerCase().includes('markhöjd')
                     );
                     
-                    writeToLog(`[ALL_MARKHOJD] Startar skanning av ${markhojdCols.length} samlingar för valt område.`);
+                    writeToLog(`[ALL_MARKHOJD] Starting scan of ${markhojdCols.length} collections for the selected area.`);
 
-                    // NUEVO: procesar estrictamente en serie + logs detallados
+                    // Process strictly in series with detailed logging
                     let processed = 0;
                     for (const col of markhojdCols) {
                         if (abortController.signal.aborted) {
-                            writeToLog(`[ALL_MARKHOJD] Processen avbröts av användaren.`);
+                            writeToLog(`[ALL_MARKHOJD] Process cancelled by user.`);
                             break;
                         }
                         processed++;
-                        writeToLog(`[ALL_MARKHOJD] (${processed}/${markhojdCols.length}) -> ${col.id} — startar hämtning.`);
+                        writeToLog(`[ALL_MARKHOJD] (${processed}/${markhojdCols.length}) -> ${col.id} — starting fetch.`);
                         try {
                             await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, abortController.signal);
-                            writeToLog(`[ALL_MARKHOJD] (${col.id}) slutförd.`);
+                            writeToLog(`[ALL_MARKHOJD] (${col.id}) complete.`);
                         } catch (err) {
-                            writeToLog(`[ALL_MARKHOJD] (${col.id}) misslyckades: ${err.message}`);
+                            writeToLog(`[ALL_MARKHOJD] (${col.id}) failed: ${err.message}`);
                         }
-                        await delay(2000); // pausa entre colecciones
+                        await delay(2000); // brief pause between collections
                     }
 
-                    writeToLog(`[ALL_MARKHOJD] SKANNING SLUTFÖRD! Kontrollera nedladdningsmappen.`);
+                    writeToLog(`[ALL_MARKHOJD] SCAN COMPLETE! Check the download folder.`);
                 } catch (err) {
-                    writeToLog(`[ALL_MARKHOJD] Kritiskt fel: ${err.message}`);
+                    writeToLog(`[ALL_MARKHOJD] Critical error: ${err.message}`);
                 } finally {
                     activeDownloads.delete(downloadId);
                 }
@@ -970,10 +1027,10 @@ app.post('/lmv/start-full-download', async (req, res) => {
             return;
         }
 
-    // Normal logik (en enda samling)
+    // Normal path: single collection
     res.status(202).json({ success: true, message: `Process startad för '${collectionId}'.`, downloadId });
     fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, type, geometry, geometryLabel, abortController.signal)
-        .catch(err => console.error(`[${collectionId}] Error tarea fondo:`, err))
+        .catch(err => console.error(`[${collectionId}] Background task error:`, err))
         .finally(() => activeDownloads.delete(downloadId));
 });
 app.post('/lmv/cancel-download', (req, res) => {
@@ -985,14 +1042,14 @@ app.post('/lmv/cancel-download', (req, res) => {
     if (controller) {
         controller.abort();
         activeDownloads.delete(downloadId);
-        writeToLog(`[CANCEL] Nedladdning avbröts: ${downloadId}`);
+        writeToLog(`[CANCEL] Download cancelled: ${downloadId}`);
         res.json({ success: true, message: 'Nedladdning avbröts.' });
     } else {
         res.json({ success: false, error: 'Nedladdning hittades inte eller är redan slutförd.' });
     }
 });
 
-// --- GESTIÓN DE DESCARGAS ---
+// --- DOWNLOAD MANAGEMENT ---
 app.get('/lmv/downloads/list', (req, res) => {
     try {
         const entries = fs.readdirSync(__dirname, { withFileTypes: true });
@@ -1003,7 +1060,7 @@ app.get('/lmv/downloads/list', (req, res) => {
                 const stats = fs.statSync(folderPath);
                 const files = fs.readdirSync(folderPath);
                 
-                // Calcular tamaño total
+                // Calculate total folder size
                 let totalSize = 0;
                 files.forEach(file => {
                     try {
@@ -1013,7 +1070,7 @@ app.get('/lmv/downloads/list', (req, res) => {
                     } catch (e) {}
                 });
                 
-                // Detectar archivos importantes
+                // Detect important files
                 const hasMerged = files.some(f => f.startsWith('merged_') && f.endsWith('.tif'));
                 const hasVrt = files.some(f => f.endsWith('.vrt'));
                 const hasTileIndex = files.includes('tile_index.geojson');
@@ -1056,7 +1113,7 @@ app.get('/lmv/downloads/download/:folderName', (req, res) => {
     const archive = archiver('zip', { zlib: { level: 9 } });
     
     archive.on('error', err => {
-        console.error('Fel vid skapande av ZIP:', err);
+        console.error('Error creating ZIP archive:', err);
         res.status(500).end();
     });
     
@@ -1078,20 +1135,62 @@ app.delete('/lmv/downloads/delete/:folderName', (req, res) => {
     
     try {
         fs.rmSync(folderPath, { recursive: true, force: true });
-        writeToLog(`[DELETE] Mapp raderad: ${folderName}`);
+        writeToLog(`[DELETE] Folder deleted: ${folderName}`);
         res.json({ success: true, message: 'Mappen raderades' });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
+// --- DIAGNOSTIC ENDPOINT: test dl1 access directly ---
+// POST /lmv/test-dl1 { url, apiUsername, apiKey, apiToken }
+// Makes a HEAD request against dl1 with the given authentication and returns HTTP status + headers.
+app.post('/lmv/test-dl1', async (req, res) => {
+    const { url, apiUsername, apiKey, apiToken } = req.body;
+    if (!url) return res.status(400).json({ success: false, error: 'url krävs' });
+
+    const testResults = [];
+
+    async function tryMethod(label, hdrs, auth) {
+        try {
+            const r = await axios({
+                method: 'HEAD',
+                url,
+                headers: hdrs,
+                auth,
+                maxRedirects: 5,
+                timeout: 15000,
+                validateStatus: () => true
+            });
+            testResults.push({ method: label, status: r.status, contentType: r.headers['content-type'] || null, contentLength: r.headers['content-length'] || null });
+        } catch (e) {
+            testResults.push({ method: label, status: null, error: e.message });
+        }
+    }
+
+    // Try Bearer token
+    if (apiToken) {
+        await tryMethod('Bearer token', { 'Authorization': `Bearer ${apiToken}` }, undefined);
+    }
+    // Try Basic Auth
+    if (apiUsername && apiKey) {
+        await tryMethod(`Basic Auth (${apiUsername})`, {}, { username: apiUsername, password: apiKey });
+    }
+    // Try without auth
+    await tryMethod('No auth', {}, undefined);
+
+    const success = testResults.some(r => r.status >= 200 && r.status < 300);
+    writeToLog(`[TEST-DL1] ${url} → ${JSON.stringify(testResults)}`);
+    res.json({ success, url, results: testResults });
+});
+
 app.listen(port, () => {
-    console.log(`Servern körs på http://localhost:${port}`);
+    console.log(`Server running at http://localhost:${port}`);
     console.log(`- Vektor:    http://localhost:${port}/lmv.html`);
     console.log(`- Höjd:      http://localhost:${port}/lmv_hojd.html`);
     console.log(`- Nedladdningar: http://localhost:${port}/downloads.html`);
 });
-// Endpoint para validar LMV-uppgifter rápidamente desde el cliente
+// Endpoint: quickly validate LMV credentials from the client
 app.post('/lmv/validate', async (req, res) => {
     const { apiKey, apiUsername, apiToken, collectionId, apiType } = req.body;
     const type = apiType || 'vektor';
@@ -1102,12 +1201,12 @@ app.post('/lmv/validate', async (req, res) => {
         const valid = await validateLmvCredentials(apiUsername, apiKey, apiToken, type, collectionId);
         if (!valid.ok) {
             const status = valid.status || 401;
-            writeToLog(`[VALIDATE-ENDPOINT] Validering misslyckades (status: ${status}) för samling ${collectionId}`);
+            writeToLog(`[VALIDATE-ENDPOINT] Validation failed (status: ${status}) for collection ${collectionId}`);
             return res.status(401).json({ success: false, error: 'Ogiltigt användarnamn eller API-nyckel mot Lantmäteriet. Kontrollera dina uppgifter.' });
         }
         return res.json({ success: true, message: 'Validering OK' });
     } catch (e) {
-        writeToLog(`[VALIDATE-ENDPOINT] Fel vid validering: ${e.message}`);
+        writeToLog(`[VALIDATE-ENDPOINT] Error during validation: ${e.message}`);
         return res.status(502).json({ success: false, error: 'Fel vid kontakt med LMV API. Försök senare.' });
     }
 });

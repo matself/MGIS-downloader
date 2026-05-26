@@ -8,21 +8,21 @@
 
 const Service = require('node-windows').Service;
 
-// Crea un nuevo objeto de servicio
+// Create a new Windows service object
 const svc = new Service({
   name: 'MGIS-Downloader',
-   description: 'ArtData och LMV data',
+  description: 'ArtData och LMV data',
   script: 'server.js',
   nodeOptions: [
-    '--harmony', // Si tienes otras opciones, inclúyelas aquí
-    '--max-old-space-size=8192' // Agregar el límite de memoria
+    '--harmony',
+    '--max-old-space-size=8192' // Increase Node.js heap limit
   ]
 });
 
-// Define eventos para el servicio
+// Log confirmation when the service has been removed
 svc.on('uninstall', function() {
-  console.log('Servicio desinstalado correctamente.');
+  console.log('Service uninstalled successfully.');
 });
 
-// Desinstala el servicio
+// Uninstall the Windows service
 svc.uninstall();

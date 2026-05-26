@@ -37,32 +37,37 @@
         <div class="auth-row">
           <div class="auth-col">
             <div class="auth-method" id="auth-methods">
-              <label class="auth-option active"><input type="radio" name="auth-method" value="userpass" checked> Användarnamn + API-nyckel</label>
-              <label class="auth-option"><input type="radio" name="auth-method" value="token"> Auth token (Bearer)</label>
-            </div>
-
-            <div id="userpass-fields">
-              <label for="apiUsername">LMV Användarnamn:</label>
-              <input type="text" id="apiUsername" placeholder="Ditt användarnamn" autocomplete="username">
-              
-              <label for="apiKey">LMV API Key:</label>
-              <input type="password" id="apiKey" placeholder="Klistra in din API-nyckel här" autocomplete="current-password">
+              <label class="auth-option active"><input type="radio" name="auth-method" value="userpass" checked> Geotorget systemkonto</label>
+              <label class="auth-option"><input type="radio" name="auth-method" value="token"> API Manager Bearer token</label>
             </div>
 
             <div id="token-field" style="display:none;" class="token-input">
-              <label for="apiToken">Auth token:</label>
-              <input type="text" id="apiToken" placeholder="Bearer token...">
+              <label for="apiToken">Bearer token (från API Manager):</label>
+              <input type="text" id="apiToken" placeholder="eyJ...">
+            </div>
+
+            <div id="token-fallback-note" style="display:none; margin-top:8px; padding:6px 10px; font-size:0.85em; color:#555; background:#f0f4ff; border-left:3px solid #3273dc; border-radius:2px;">
+              Ange Geotorget-konto nedan (valfritt). Används automatiskt som fallback om Bearer-token nekas av nedladdningsservern (dl1) för ett specifikt dataset.
+            </div>
+
+            <div id="userpass-fields">
+              <label for="apiUsername" id="label-apiUsername">Systemkonto:</label>
+              <input type="text" id="apiUsername" placeholder="t.ex. elma0001" autocomplete="username">
+
+              <label for="apiKey" id="label-apiKey">Lösenord:</label>
+              <input type="password" id="apiKey" placeholder="" autocomplete="current-password">
             </div>
           </div>
 
           <div class="auth-col">
             <div class="credential-warning">
-              <strong>Varning:</strong> Använd antingen ett token genererat i <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">API Manager (apimanager)</a> <em>eller</em> ett systemkonto från <a href="https://geotorget.lantmateriet.se/" target="_blank">Geotorget</a>. Token måste ha rätt scopes för STAC (collections/assets).
+              <strong>Geotorget systemkonto</strong> — skapa på <a href="https://geotorget.lantmateriet.se/" target="_blank">geotorget.lantmateriet.se</a>. Kom ihåg att beställa de dataset du vill ladda ner.<br><br>
+              <strong>API Manager Bearer token</strong> — generera på <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">apimanager.lantmateriet.se</a>. Token används mot STAC-katalogen och dl1 när det stöds. Fyll i Geotorget-konto (valfritt) för automatisk fallback om Bearer nekas av dl1.
             </div>
           </div>
         </div>
-        <p class="info-text" style="margin-top:6px;color:#9a1f00;background:#fff6f6;padding:8px;border-left:4px solid #ff3860;">
-          <strong>Viktigt:</strong> Använd ett token genererat i <a href="https://apimanager.lantmateriet.se/devportal/apis" target="_blank">API Manager</a> eller ett <em>systemkonto</em> från <a href="https://geotorget.lantmateriet.se/" target="_blank">Geotorget</a>. Token måste ha rätt scopes för STAC (collections/assets).
+        <p class="info-text" style="margin-top:6px;color:#555;background:#f0f4ff;padding:8px;border-left:4px solid #3273dc;">
+          <strong>OBS:</strong> Du måste ha beställt datasetet i <a href="https://geotorget.lantmateriet.se/" target="_blank">Geotorget</a> för att nedladdningen ska fungera — även för öppna data.
         </p>
         
         <div class="checkbox-group">
@@ -103,7 +108,7 @@
     <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
     
     <script>
-      // Sistema de almacenamiento seguro de credenciales (soporta token o user/pass)
+      // Secure credential storage system (supports token or username/password)
       (function() {
         const apiUsernameInput = document.getElementById('apiUsername');
         const apiKeyInput = document.getElementById('apiKey');
@@ -115,12 +120,21 @@
 
         function updateAuthVisibility() {
           const method = Array.from(authRadios).find(r => r.checked).value;
+          const fallbackNote = document.getElementById('token-fallback-note');
           if (method === 'token') {
-            userpassFields.style.display = 'none';
+            // Token mode: Bearer token required; Geotorget credentials optional for dl1 fallback
             tokenField.style.display = 'block';
-          } else {
+            if (fallbackNote) fallbackNote.style.display = 'block';
             userpassFields.style.display = 'block';
+            document.getElementById('label-apiUsername').textContent = 'Systemkonto (dl1-fallback, valfritt):';
+            document.getElementById('label-apiKey').textContent = 'Lösenord (dl1-fallback, valfritt):';
+          } else {
+            // Userpass mode: Geotorget system account (Basic Auth against STAC and dl1)
             tokenField.style.display = 'none';
+            if (fallbackNote) fallbackNote.style.display = 'none';
+            userpassFields.style.display = 'block';
+            document.getElementById('label-apiUsername').textContent = 'Systemkonto:';
+            document.getElementById('label-apiKey').textContent = 'Lösenord:';
           }
         }
 
@@ -139,15 +153,18 @@
             apiUsernameInput.value = savedUsername;
             apiKeyInput.value = atob(savedApiKey);
           }
-          if (savedMethod === 'token' && savedToken) {
-            apiTokenInput.value = atob(savedToken);
+          if (savedMethod === 'token') {
+            if (savedToken) apiTokenInput.value = atob(savedToken);
+            // Also restore optional Geotorget fallback credentials for dl1
+            if (savedUsername) apiUsernameInput.value = savedUsername;
+            if (savedApiKey) apiKeyInput.value = atob(savedApiKey);
           }
         }
 
         Array.from(authRadios).forEach(r => r.addEventListener('change', function() {
           localStorage.setItem('lmv_hojd_auth_method', this.value);
           updateAuthVisibility();
-          // Toggle active class on labels
+          // Toggle active CSS class on labels
           document.querySelectorAll('.auth-option').forEach(opt => opt.classList.remove('active'));
           const parentLabel = this.closest('label') || this.parentElement;
           if (parentLabel && parentLabel.classList) parentLabel.classList.add('active');
@@ -168,6 +185,9 @@
               const token = apiTokenInput.value;
               if (token) {
                 localStorage.setItem('lmv_hojd_token', btoa(token));
+                // Also save optional Geotorget fallback credentials for dl1
+                if (apiUsernameInput.value) localStorage.setItem('lmv_hojd_username', apiUsernameInput.value);
+                if (apiKeyInput.value) localStorage.setItem('lmv_hojd_apikey', btoa(apiKeyInput.value));
                 localStorage.setItem('lmv_hojd_remember', 'true');
               }
             }
@@ -189,6 +209,9 @@
                 localStorage.setItem('lmv_hojd_apikey', btoa(apiKeyInput.value));
               } else {
                 localStorage.setItem('lmv_hojd_token', btoa(apiTokenInput.value));
+                // Also persist optional Geotorget fallback credentials for dl1
+                if (apiUsernameInput.value) localStorage.setItem('lmv_hojd_username', apiUsernameInput.value);
+                if (apiKeyInput.value) localStorage.setItem('lmv_hojd_apikey', btoa(apiKeyInput.value));
               }
             }
           });
