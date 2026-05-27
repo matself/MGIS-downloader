@@ -598,7 +598,43 @@ async function downloadWithRedirects(url, headers, auth, timeout = 60000) {
     throw new Error('Too many redirects');
 }
 
-async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, downloadId = null, abortSignal = null) {
+// --- Merge, overview, VRT and style generation for a completed raster folder ---
+async function runPostProcessing(folderName, vrtBaseName, label) {
+    const tifFiles = fs.readdirSync(folderName)
+        .filter(name => name.toLowerCase().endsWith('.tif') || name.toLowerCase().endsWith('.tiff'))
+        .sort();
+    if (tifFiles.length === 0) return; // nothing to process (vector-only collection)
+
+    const vrtFileName = `${vrtBaseName}.vrt`;
+    const mergedFileName = `merged_${vrtBaseName}.tif`;
+    const mergedPath = path.join(folderName, mergedFileName);
+
+    writeToLog(`[${label}] Post-processing: merging ${tifFiles.length} tiles → ${mergedFileName}`);
+    await runGdalMerge(folderName, tifFiles, mergedFileName);
+    writeToLog(`[${label}] Merge complete.`);
+
+    writeToLog(`[${label}] Removing ${tifFiles.length} original tiles...`);
+    tifFiles.forEach(f => { try { fs.unlinkSync(path.join(folderName, f)); } catch(e) {} });
+
+    writeToLog(`[${label}] Building overviews (gdaladdo)...`);
+    await runGdalAddo(folderName, mergedFileName);
+    writeToLog(`[${label}] Overviews complete.`);
+
+    fs.writeFileSync(path.join(folderName, 'filelist.txt'), mergedFileName);
+    await runGdalBuildVrt(folderName, 'filelist.txt', vrtFileName);
+    writeToLog(`[${label}] VRT generated: ${vrtFileName}`);
+
+    try {
+        const stats = await runGdalInfo(mergedPath);
+        const qmlContent = buildDynamicQml(stats.min, stats.max, 5);
+        fs.writeFileSync(path.join(folderName, `${vrtFileName}.qml`), qmlContent, 'utf8');
+        writeToLog(`[${label}] Style generated (5-unit intervals).`);
+    } catch (styleErr) {
+        console.warn(`[${label}] Could not generate style: ${styleErr.message}`);
+    }
+}
+
+async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, downloadId = null, abortSignal = null, overrideFolderName = null, skipPostProcessing = false) {
     const STAC_BASE = getStacBase(apiType);
     const slugFromLabel = geometryLabel ? slugify(geometryLabel) : '';
     let areaSlug = slugFromLabel;
@@ -617,13 +653,15 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         } catch (e) { /* ignore — will fall back to no suffix */ }
     }
     const folderSuffix = areaSlug ? `_${areaSlug}` : '';
-    const downloadFolderName = `LMV_DOWNLOADS_${collectionId}${folderSuffix}`;
+    // Use overrideFolderName when provided (e.g. MHM_YYYYMMDD_HHMMSS shared folder)
+    const downloadFolderName = overrideFolderName || `LMV_DOWNLOADS_${collectionId}${folderSuffix}`;
     const vrtBaseName = areaSlug ? `index_${areaSlug}` : 'index';
     const vrtFileName = `${vrtBaseName}.vrt`;
 
     // Only skip if a fully-merged raster already exists in this folder.
     // Individual tiles being present (incomplete previous run) is NOT a reason to skip.
-    if (fs.existsSync(downloadFolderName)) {
+    // When writing to an override folder (shared MHM run), never skip — always add tiles.
+    if (!overrideFolderName && fs.existsSync(downloadFolderName)) {
         try {
             const hasMerged = fs.readdirSync(downloadFolderName)
                 .some(f => f.startsWith('merged_') && f.toLowerCase().endsWith('.tif'));
@@ -913,78 +951,35 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         if (downloadId) { const p = downloadProgress.get(downloadId); if (p) p.done++; }
     }
 
-    // Generate tile_index.geojson
+    // Generate (or append to) tile_index.geojson
     if (tileIndexFeatures.length > 0) {
+        const indexFile = path.join(downloadFolderName, 'tile_index.geojson');
+        // When multiple collections share a folder, merge with any existing features
+        let existingFeatures = [];
+        if (overrideFolderName && fs.existsSync(indexFile)) {
+            try { existingFeatures = JSON.parse(fs.readFileSync(indexFile, 'utf8')).features || []; } catch(e) {}
+        }
         const geoJSON = {
             type: "FeatureCollection",
-            name: `TileIndex_${collectionId}`,
+            name: overrideFolderName ? 'TileIndex_MHM' : `TileIndex_${collectionId}`,
             crs: { type: "name", properties: { name: "urn:ogc:def:crs:OGC:1.3:CRS84" } },
-            features: tileIndexFeatures
+            features: [...existingFeatures, ...tileIndexFeatures]
         };
-        
-        const indexFile = path.join(downloadFolderName, 'tile_index.geojson');
         try {
             fs.writeFileSync(indexFile, JSON.stringify(geoJSON, null, 2));
-            writeToLog(`[${collectionId}] Tile index generated: ${indexFile}`);
+            writeToLog(`[${collectionId}] Tile index: ${geoJSON.features.length} features → ${indexFile}`);
         } catch (err) {
             console.error(`Error writing tile index: ${err.message}`);
         }
     }
 
-    // POST-PROCESSING: Merge + Overviews + VRT + Style
-    try {
-        const tifFiles = fs.readdirSync(downloadFolderName)
-            .filter(name => name.toLowerCase().endsWith('.tif') || name.toLowerCase().endsWith('.tiff'))
-            .sort();
-
-        if (tifFiles.length > 0) {
-            writeToLog(`[${collectionId}] Starting post-processing: merging ${tifFiles.length} tiles...`);
-            
-            const mergedFileName = `merged_${vrtBaseName}.tif`;
-            const mergedPath = path.join(downloadFolderName, mergedFileName);
-            
-            try {
-                // 1. Merge all tiles into a single GeoTIFF
-                await runGdalMerge(downloadFolderName, tifFiles, mergedFileName);
-                writeToLog(`[${collectionId}] Merge complete: ${mergedFileName}`);
-
-                // 2. Remove the original tiles
-                writeToLog(`[${collectionId}] Removing ${tifFiles.length} original tiles...`);
-                tifFiles.forEach(file => {
-                    try {
-                        fs.unlinkSync(path.join(downloadFolderName, file));
-                    } catch (e) {
-                        console.warn(`Could not remove ${file}: ${e.message}`);
-                    }
-                });
-                
-                // 3. Build overviews (pyramids)
-                writeToLog(`[${collectionId}] Building overview levels (gdaladdo -r average)...`);
-                await runGdalAddo(downloadFolderName, mergedFileName);
-                writeToLog(`[${collectionId}] Overviews complete.`);
-
-                // 4. Generate VRT pointing to the merged file
-                const listPath = path.join(downloadFolderName, 'filelist.txt');
-                fs.writeFileSync(listPath, mergedFileName);
-                await runGdalBuildVrt(downloadFolderName, 'filelist.txt', vrtFileName);
-                writeToLog(`[${collectionId}] VRT generated: ${vrtFileName}`);
-
-                // 5. Generate dynamic style
-                try {
-                    const stats = await runGdalInfo(mergedPath);
-                    const qmlContent = buildDynamicQml(stats.min, stats.max, 5);
-                    const qmlPath = path.join(downloadFolderName, `${vrtFileName}.qml`);
-                    fs.writeFileSync(qmlPath, qmlContent, 'utf8');
-                    writeToLog(`[${collectionId}] Dynamic style applied (5-unit intervals).`);
-                } catch (styleErr) {
-                    console.warn(`[${collectionId}] Could not generate style: ${styleErr.message}`);
-                }
-            } catch (postErr) {
-                console.warn(`[${collectionId}] Error in post-processing: ${postErr.message}`);
-            }
+    // POST-PROCESSING: only run when not delegated to an outer caller
+    if (!skipPostProcessing) {
+        try {
+            await runPostProcessing(downloadFolderName, vrtBaseName, collectionId);
+        } catch (postErr) {
+            console.warn(`[${collectionId}] Post-processing error: ${postErr.message}`);
         }
-    } catch (vrtErr) {
-        console.error(`Could not prepare post-processing for ${collectionId}: ${vrtErr.message}`);
     }
 
     writeToLog(`[${collectionId}] Process complete.`);
@@ -1084,6 +1079,13 @@ app.post('/lmv/start-full-download', async (req, res) => {
                         return;
                     }
 
+                    // One timestamped folder for all tiles from this run
+                    const _now = new Date();
+                    const _p = n => String(n).padStart(2, '0');
+                    const mhmFolder = `MHM_${_now.getFullYear()}${_p(_now.getMonth()+1)}${_p(_now.getDate())}_${_p(_now.getHours())}${_p(_now.getMinutes())}${_p(_now.getSeconds())}`;
+                    fs.mkdirSync(mhmFolder, { recursive: true });
+                    writeToLog(`[ALL_MARKHOJD] Output folder: ${mhmFolder}`);
+
                     writeToLog(`[ALL_MARKHOJD] Starting download for ${markhojdCols.length} collections.`);
 
                     // Track collection-level progress for the UI
@@ -1106,8 +1108,8 @@ app.post('/lmv/start-full-download', async (req, res) => {
                         const p = downloadProgress.get(downloadId);
                         if (p) p.currentFile = col.title || col.id;
                         try {
-                            // Inner calls use null downloadId — progress tracked at collection level above
-                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, null, abortController.signal);
+                            // Inner calls share the MHM folder; post-processing runs once at the end
+                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, null, abortController.signal, mhmFolder, true);
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) complete.`);
                         } catch (err) {
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) failed: ${err.message}`);
@@ -1117,10 +1119,22 @@ app.post('/lmv/start-full-download', async (req, res) => {
                         await delay(2000); // brief pause between collections
                     }
 
+                    // Run post-processing once on the combined MHM folder
+                    if (!abortController.signal.aborted) {
+                        const pProc = downloadProgress.get(downloadId);
+                        if (pProc) pProc.currentFile = 'Bearbetar raster (merge + overview + VRT)...';
+                        writeToLog(`[ALL_MARKHOJD] Running post-processing on ${mhmFolder}...`);
+                        try {
+                            await runPostProcessing(mhmFolder, 'index', 'ALL_MARKHOJD');
+                        } catch(ppErr) {
+                            writeToLog(`[ALL_MARKHOJD] Post-processing error: ${ppErr.message}`);
+                        }
+                    }
+
                     const pFinal = downloadProgress.get(downloadId);
                     if (pFinal) { pFinal.status = 'done'; pFinal.currentFile = ''; }
                     setTimeout(() => downloadProgress.delete(downloadId), 10 * 60 * 1000);
-                    writeToLog(`[ALL_MARKHOJD] SCAN COMPLETE! Check the download folder.`);
+                    writeToLog(`[ALL_MARKHOJD] COMPLETE. Folder: ${mhmFolder}`);
                 } catch (err) {
                     writeToLog(`[ALL_MARKHOJD] Critical error: ${err.message}`);
                 } finally {

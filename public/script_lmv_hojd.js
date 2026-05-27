@@ -269,7 +269,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 2. Initialise download controls
     const messageDiv = document.getElementById('result-message');
     const btn = document.getElementById('start-download-btn');
-    const downloadAllBtn = document.getElementById('download-all-btn');
     const stopBtn = document.getElementById('stop-download-btn');
 
     let currentDownloadId = null;
@@ -396,27 +395,4 @@ document.addEventListener('DOMContentLoaded', async () => {
         }, btn, 'Starta Nedladdning');
     });
 
-    downloadAllBtn.addEventListener('click', () => {
-        const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
-        const apiUsername = document.getElementById('apiUsername').value;
-        const apiKey = document.getElementById('apiKey').value;
-        const apiToken = document.getElementById('apiToken').value;
-        if (authMethod === 'userpass' && (!apiUsername || !apiKey)) return showMsg('Ange systemkonto och lösenord.', 'error');
-        if (authMethod === 'token' && !apiToken) return showMsg('Ange Auth token.', 'error');
-        // For a full download, require license acceptance if a collection is selected
-        const selOpt = hojdCollectionSelect ? hojdCollectionSelect.selectedOptions[0] : null;
-        const license = selOpt ? selOpt.dataset.license : null;
-        if (license && !hojdAcceptLicenseCheckbox.checked) {
-            return showMsg('Du måste godkänna licensvillkoren för den valda samlingen innan du fortsätter.', 'error');
-        }
-        triggerDownload({
-            apiUsername,
-            apiKey,
-            apiToken: apiToken || undefined,
-            collectionId: hojdCollectionSelect && hojdCollectionSelect.value ? hojdCollectionSelect.value : 'ALL_MARKHOJD',
-            apiType: 'hojd',
-            geometry: null,
-            geometryLabel: null
-        }, downloadAllBtn, 'Ladda ner hela Sverige');
-    });
 });
