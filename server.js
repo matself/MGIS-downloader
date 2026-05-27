@@ -601,18 +601,34 @@ async function downloadWithRedirects(url, headers, auth, timeout = 60000) {
 async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, downloadId = null, abortSignal = null) {
     const STAC_BASE = getStacBase(apiType);
     const slugFromLabel = geometryLabel ? slugify(geometryLabel) : '';
-    const areaSlug = slugFromLabel || (geometryLabel ? 'omrade' : '');
+    let areaSlug = slugFromLabel;
+    // For unnamed drawn geometries (no label), generate a compact bbox string so
+    // different areas don't share the same download folder.
+    if (!areaSlug && geometry) {
+        try {
+            const gj = normalizeGeometryPayload(geometry);
+            if (gj && gj.coordinates && gj.coordinates[0]) {
+                const coords = gj.coordinates[0];
+                const lons = coords.map(c => c[0]);
+                const lats = coords.map(c => c[1]);
+                const toTag = v => v.toFixed(2).replace('-', 'm').replace('.', '_');
+                areaSlug = `${toTag(Math.min(...lons))}-${toTag(Math.min(...lats))}-${toTag(Math.max(...lons))}-${toTag(Math.max(...lats))}`;
+            }
+        } catch (e) { /* ignore — will fall back to no suffix */ }
+    }
     const folderSuffix = areaSlug ? `_${areaSlug}` : '';
     const downloadFolderName = `LMV_DOWNLOADS_${collectionId}${folderSuffix}`;
     const vrtBaseName = areaSlug ? `index_${areaSlug}` : 'index';
     const vrtFileName = `${vrtBaseName}.vrt`;
-    const folderAlreadyExists = fs.existsSync(downloadFolderName);
-    if (folderAlreadyExists) {
+
+    // Only skip if a fully-merged raster already exists in this folder.
+    // Individual tiles being present (incomplete previous run) is NOT a reason to skip.
+    if (fs.existsSync(downloadFolderName)) {
         try {
-            const existingTifs = fs.readdirSync(downloadFolderName)
-                .filter(name => name.toLowerCase().endsWith('.tif') || name.toLowerCase().endsWith('.tiff'));
-            if (existingTifs.length > 0) {
-                writeToLog(`[${collectionId}] Folder already exists (${downloadFolderName}) with ${existingTifs.length} rasters. Skipping new download.`);
+            const hasMerged = fs.readdirSync(downloadFolderName)
+                .some(f => f.startsWith('merged_') && f.toLowerCase().endsWith('.tif'));
+            if (hasMerged) {
+                writeToLog(`[${collectionId}] Merged raster already exists in ${downloadFolderName}. Skipping.`);
                 return;
             }
         } catch (err) {
@@ -776,7 +792,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             let bearerFallbackAttempted = false;
             try {
-                if (!fs.existsSync(filePath)) {
+                if (!fs.existsSync(filePath) && !fs.existsSync(filePath + '.done')) {
                     const downloadHeaders = {};
                     let downloadAuth = undefined;
                     let dlMethod = '';
@@ -826,15 +842,17 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                     });
                     console.log(`[${i+1}/${downloadQueue.length}] Downloaded: ${filename}`);
                 } else {
-                    console.log(`[${i+1}/${downloadQueue.length}] Already exists: ${filename}`);
+                    console.log(`[${i+1}/${downloadQueue.length}] Already exists (skipping): ${filename}`);
                 }
 
-                // If the file is a ZIP, extract it
+                // If the file is a ZIP, extract it then leave a .done marker so
+                // subsequent runs know extraction already happened (the ZIP itself is deleted).
                 if (filename.toLowerCase().endsWith('.zip')) {
                     await fs.createReadStream(filePath)
                         .pipe(unzipper.Extract({ path: downloadFolderName }))
                         .promise();
                     try { fs.unlinkSync(filePath); } catch(e){}
+                    try { fs.writeFileSync(filePath + '.done', ''); } catch(e){}
                 }
 
                 // Build a Feature for the Tile Index, only when we have a valid bbox
@@ -1020,11 +1038,53 @@ app.post('/lmv/start-full-download', async (req, res) => {
                     const listRes = await axios.get('https://api.lantmateriet.se/stac-hojd/v1/collections', {
                         headers: listHeaders
                     });
-                    const markhojdCols = listRes.data.collections.filter(col => 
+                    const allMarkhojdCols = listRes.data.collections.filter(col =>
                         col.id.toLowerCase().includes('markhojd') || col.title.toLowerCase().includes('markhöjd')
                     );
-                    
-                    writeToLog(`[ALL_MARKHOJD] Starting scan of ${markhojdCols.length} collections for the selected area.`);
+                    writeToLog(`[ALL_MARKHOJD] Found ${allMarkhojdCols.length} Markhöjdmodell collections in catalogue.`);
+
+                    // --- Upfront STAC search: find which collections have tiles in the requested area ---
+                    // This replaces 76 individual searches with a single request.
+                    let markhojdCols = allMarkhojdCols; // default: all (used for full-Sweden or if preflight fails)
+                    if (geometry) {
+                        try {
+                            const geoJson = normalizeGeometryPayload(geometry);
+                            if (geoJson) {
+                                const preHeaders = { 'Content-Type': 'application/json' };
+                                const preConfig = { headers: preHeaders };
+                                if (apiToken) preHeaders['Authorization'] = `Bearer ${apiToken}`;
+                                else if (apiUsername && apiKey) preConfig.auth = { username: apiUsername, password: apiKey };
+                                const preBody = {
+                                    collections: allMarkhojdCols.map(c => c.id),
+                                    intersects: geoJson,
+                                    limit: 1000,
+                                    fields: { include: ['collection'], exclude: ['geometry', 'assets', 'links'] }
+                                };
+                                const preRes = await axios.post('https://api.lantmateriet.se/stac-hojd/v1/search', preBody, preConfig);
+                                const hitColIds = new Set((preRes.data.features || []).map(f => f.collection).filter(Boolean));
+                                if (hitColIds.size > 0) {
+                                    markhojdCols = allMarkhojdCols.filter(c => hitColIds.has(c.id));
+                                    writeToLog(`[ALL_MARKHOJD] Preflight search: ${hitColIds.size} collections have tiles in the requested area (skipping ${allMarkhojdCols.length - hitColIds.size}).`);
+                                } else {
+                                    writeToLog(`[ALL_MARKHOJD] Preflight search returned 0 hits — no tiles in the requested area.`);
+                                    markhojdCols = []; // nothing to download
+                                }
+                            }
+                        } catch (preErr) {
+                            writeToLog(`[ALL_MARKHOJD] Preflight search failed (${preErr.message}). Falling back to scanning all ${allMarkhojdCols.length} collections.`);
+                        }
+                    }
+
+                    if (markhojdCols.length === 0) {
+                        writeToLog(`[ALL_MARKHOJD] No collections to process. Done.`);
+                        const pEmpty = downloadProgress.get(downloadId);
+                        if (pEmpty) { pEmpty.status = 'done'; pEmpty.total = 0; }
+                        setTimeout(() => downloadProgress.delete(downloadId), 10 * 60 * 1000);
+                        activeDownloads.delete(downloadId);
+                        return;
+                    }
+
+                    writeToLog(`[ALL_MARKHOJD] Starting download for ${markhojdCols.length} collections.`);
 
                     // Track collection-level progress for the UI
                     downloadProgress.set(downloadId, {
