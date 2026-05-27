@@ -117,16 +117,9 @@ function runGdalMerge(targetDir, tifFiles, outputName) {
         const mergeListPath = path.join(targetDir, 'merge_list.txt');
         fs.writeFileSync(mergeListPath, tifFiles.join('\n'));
         
-        const args = [
-            '/c', PYTHON_CMD,
-            GDAL_MERGE_CMD, '-o', outputName,
-            '--optfile', 'merge_list.txt',
-            '-co', 'COMPRESS=DEFLATE',
-            '-co', 'PREDICTOR=2',
-            '-co', 'TILED=YES',
-            '-co', 'BIGTIFF=IF_SAFER'
-        ];
-        const child = spawn('cmd.exe', args, { cwd: targetDir, windowsHide: true });
+        // Wrap paths in quotes so cmd.exe /c handles spaces in QGIS install path correctly
+        const cmdStr = `"${PYTHON_CMD}" "${GDAL_MERGE_CMD}" -o "${outputName}" --optfile merge_list.txt -co COMPRESS=DEFLATE -co PREDICTOR=2 -co TILED=YES -co BIGTIFF=IF_SAFER`;
+        const child = spawn('cmd.exe', ['/c', cmdStr], { cwd: targetDir, windowsHide: true });
         let stderr = '';
         child.stderr.on('data', chunk => { stderr += chunk.toString(); });
         child.on('error', err => reject(err));
