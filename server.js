@@ -795,12 +795,19 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         return;
     }
 
-    // Register progress so the client can poll /lmv/progress/:downloadId
+    // Register progress so the client can poll /lmv/progress/:downloadId.
+    // When multiple collections share a downloadId (ALL_MARKHOJD), accumulate
+    // the file total rather than overwriting, so the bar reflects all files.
     if (downloadId) {
-        downloadProgress.set(downloadId, {
-            total: downloadQueue.length, done: 0, failed: 0,
-            currentFile: '', status: 'running'
-        });
+        const existing = downloadProgress.get(downloadId);
+        if (existing) {
+            existing.total += downloadQueue.length;
+        } else {
+            downloadProgress.set(downloadId, {
+                total: downloadQueue.length, done: 0, failed: 0,
+                currentFile: '', status: 'running'
+            });
+        }
     }
 
     fs.mkdirSync(downloadFolderName, { recursive: true }); // recursive:true is a no-op if folder already exists
@@ -983,10 +990,11 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
     }
 
     writeToLog(`[${collectionId}] Process complete.`);
-    if (downloadId) {
+    // Only mark done when this is a standalone call, not an inner ALL_MARKHOJD call
+    // (identified by skipPostProcessing). The outer handler marks done after the loop.
+    if (downloadId && !skipPostProcessing) {
         const p = downloadProgress.get(downloadId);
         if (p) { p.status = 'done'; p.currentFile = ''; }
-        // Remove progress entry after 10 minutes so the Map doesn't grow forever
         setTimeout(() => downloadProgress.delete(downloadId), 10 * 60 * 1000);
     }
 }
@@ -1088,10 +1096,11 @@ app.post('/lmv/start-full-download', async (req, res) => {
 
                     writeToLog(`[ALL_MARKHOJD] Starting download for ${markhojdCols.length} collections.`);
 
-                    // Track collection-level progress for the UI
+                    // Seed a file-level progress entry (total accumulates as each
+                    // collection's STAC search reveals how many files there are).
                     downloadProgress.set(downloadId, {
-                        total: markhojdCols.length, done: 0, failed: 0,
-                        currentFile: '', status: 'running', type: 'collections'
+                        total: 0, done: 0, failed: 0,
+                        currentFile: 'Söker filer...', status: 'running'
                     });
 
                     // Process strictly in series with detailed logging
@@ -1105,17 +1114,13 @@ app.post('/lmv/start-full-download', async (req, res) => {
                         }
                         processed++;
                         writeToLog(`[ALL_MARKHOJD] (${processed}/${markhojdCols.length}) -> ${col.id} — starting fetch.`);
-                        const p = downloadProgress.get(downloadId);
-                        if (p) p.currentFile = col.title || col.id;
                         try {
-                            // Inner calls share the MHM folder; post-processing runs once at the end
-                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, null, abortController.signal, mhmFolder, true);
+                            // Pass outer downloadId so file-level progress is tracked inside
+                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, downloadId, abortController.signal, mhmFolder, true);
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) complete.`);
                         } catch (err) {
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) failed: ${err.message}`);
-                            if (p) p.failed++;
                         }
-                        if (p) p.done++;
                         await delay(2000); // brief pause between collections
                     }
 

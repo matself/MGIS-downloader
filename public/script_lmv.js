@@ -211,11 +211,11 @@ function startProgressPolling(downloadId) {
                 return;
             }
 
-            const isCollectionMode = data.type === 'collections';
-            const unit  = isCollectionMode ? 'samlingar' : 'filer';
             const pct   = data.total > 0 ? Math.round((data.done / data.total) * 100) : 0;
             bar.style.width   = pct + '%';
-            label.textContent = `${data.done} / ${data.total} ${unit} (${pct}%)`;
+            label.textContent = data.total > 0
+                ? `${data.done} / ${data.total} filer (${pct}%)`
+                : 'Söker filer...';
             if (data.currentFile) detail.textContent = data.currentFile;
 
             if (data.status === 'done' || data.status === 'cancelled') {
