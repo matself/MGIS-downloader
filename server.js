@@ -803,7 +803,7 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         });
     }
 
-    if (!folderAlreadyExists) fs.mkdirSync(downloadFolderName, { recursive: true });
+    fs.mkdirSync(downloadFolderName, { recursive: true }); // recursive:true is a no-op if folder already exists
 
     // Array to hold features for the final tile index GeoJSON
     let tileIndexFeatures = [];
