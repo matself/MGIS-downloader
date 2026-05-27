@@ -12,13 +12,16 @@ const path = require('path');
 const { URL } = require('url');
 const http = require('http');
 const unzipper = require('unzipper');
-const { spawn } = require('child_process');
+const { spawn, exec } = require('child_process');
 const archiver = require('archiver');
 const app = express();
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3003;
 const LAN_GEOJSON_PATH = path.join(__dirname, 'data', 'lan.geojson');
 
 const activeDownloads = new Map();
+// Tracks per-file download progress keyed by downloadId.
+// Structure: { total, done, failed, currentFile, status: 'running'|'done'|'cancelled' }
+const downloadProgress = new Map();
 
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static('public'));
@@ -595,7 +598,7 @@ async function downloadWithRedirects(url, headers, auth, timeout = 60000) {
     throw new Error('Too many redirects');
 }
 
-async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, abortSignal = null) {
+async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, apiType, geometry, geometryLabel = null, downloadId = null, abortSignal = null) {
     const STAC_BASE = getStacBase(apiType);
     const slugFromLabel = geometryLabel ? slugify(geometryLabel) : '';
     const areaSlug = slugFromLabel || (geometryLabel ? 'omrade' : '');
@@ -738,6 +741,14 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         return;
     }
 
+    // Register progress so the client can poll /lmv/progress/:downloadId
+    if (downloadId) {
+        downloadProgress.set(downloadId, {
+            total: downloadQueue.length, done: 0, failed: 0,
+            currentFile: '', status: 'running'
+        });
+    }
+
     if (!folderAlreadyExists) fs.mkdirSync(downloadFolderName, { recursive: true });
 
     // Array to hold features for the final tile index GeoJSON
@@ -753,8 +764,14 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
         const url = itemData.url;
         const filename = path.basename(new URL(url).pathname);
         const filePath = path.join(downloadFolderName, filename);
-        
-        await delay(1000); 
+
+        // Update the progress indicator so the UI shows the current filename
+        if (downloadId) {
+            const p = downloadProgress.get(downloadId);
+            if (p) p.currentFile = filename;
+        }
+
+        await delay(1000);
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             let bearerFallbackAttempted = false;
@@ -856,11 +873,13 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                             : 'Invalid credentials for dl1. Check your Geotorget account and dataset subscription.';
                     writeToLog(`[DOWNLOAD] 401 – skipping ${filename}: ${hint}`);
                     console.warn(`[${collectionId}] 401 – skipping ${filename}: ${hint}`);
+                    if (downloadId) { const p = downloadProgress.get(downloadId); if (p) p.failed++; }
                     break; // Do not retry
                 } else if (status === 403) {
                     // 403 = authenticated but no subscription for this dataset.
                     writeToLog(`[DOWNLOAD] 403 – skipping ${filename}: account has no subscription for this dataset in Geotorget.`);
                     console.warn(`[${collectionId}] 403 – skipping ${filename}: no dataset subscription in Geotorget.`);
+                    if (downloadId) { const p = downloadProgress.get(downloadId); if (p) p.failed++; }
                     break; // Do not retry
                 } else if (status === 429) {
                     const waitTime = 30000;
@@ -872,6 +891,8 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
                 }
             }
         }
+        // Count this file as processed regardless of outcome (downloaded, skipped, or failed)
+        if (downloadId) { const p = downloadProgress.get(downloadId); if (p) p.done++; }
     }
 
     // Generate tile_index.geojson
@@ -949,6 +970,12 @@ async function fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectio
     }
 
     writeToLog(`[${collectionId}] Process complete.`);
+    if (downloadId) {
+        const p = downloadProgress.get(downloadId);
+        if (p) { p.status = 'done'; p.currentFile = ''; }
+        // Remove progress entry after 10 minutes so the Map doesn't grow forever
+        setTimeout(() => downloadProgress.delete(downloadId), 10 * 60 * 1000);
+    }
 }
 
 // --- DOWNLOAD START ROUTE ---
@@ -999,24 +1026,40 @@ app.post('/lmv/start-full-download', async (req, res) => {
                     
                     writeToLog(`[ALL_MARKHOJD] Starting scan of ${markhojdCols.length} collections for the selected area.`);
 
+                    // Track collection-level progress for the UI
+                    downloadProgress.set(downloadId, {
+                        total: markhojdCols.length, done: 0, failed: 0,
+                        currentFile: '', status: 'running', type: 'collections'
+                    });
+
                     // Process strictly in series with detailed logging
                     let processed = 0;
                     for (const col of markhojdCols) {
                         if (abortController.signal.aborted) {
                             writeToLog(`[ALL_MARKHOJD] Process cancelled by user.`);
+                            const p = downloadProgress.get(downloadId);
+                            if (p) p.status = 'cancelled';
                             break;
                         }
                         processed++;
                         writeToLog(`[ALL_MARKHOJD] (${processed}/${markhojdCols.length}) -> ${col.id} — starting fetch.`);
+                        const p = downloadProgress.get(downloadId);
+                        if (p) p.currentFile = col.title || col.id;
                         try {
-                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, abortController.signal);
+                            // Inner calls use null downloadId — progress tracked at collection level above
+                            await fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, col.id, 'hojd', geometry, geometryLabel, null, abortController.signal);
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) complete.`);
                         } catch (err) {
                             writeToLog(`[ALL_MARKHOJD] (${col.id}) failed: ${err.message}`);
+                            if (p) p.failed++;
                         }
+                        if (p) p.done++;
                         await delay(2000); // brief pause between collections
                     }
 
+                    const pFinal = downloadProgress.get(downloadId);
+                    if (pFinal) { pFinal.status = 'done'; pFinal.currentFile = ''; }
+                    setTimeout(() => downloadProgress.delete(downloadId), 10 * 60 * 1000);
                     writeToLog(`[ALL_MARKHOJD] SCAN COMPLETE! Check the download folder.`);
                 } catch (err) {
                     writeToLog(`[ALL_MARKHOJD] Critical error: ${err.message}`);
@@ -1029,7 +1072,7 @@ app.post('/lmv/start-full-download', async (req, res) => {
 
     // Normal path: single collection
     res.status(202).json({ success: true, message: `Process startad för '${collectionId}'.`, downloadId });
-    fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, type, geometry, geometryLabel, abortController.signal)
+    fetchDownloadAndUnzipAll(apiKey, apiUsername, apiToken, collectionId, type, geometry, geometryLabel, downloadId, abortController.signal)
         .catch(err => console.error(`[${collectionId}] Background task error:`, err))
         .finally(() => activeDownloads.delete(downloadId));
 });
@@ -1182,6 +1225,38 @@ app.post('/lmv/test-dl1', async (req, res) => {
     const success = testResults.some(r => r.status >= 200 && r.status < 300);
     writeToLog(`[TEST-DL1] ${url} → ${JSON.stringify(testResults)}`);
     res.json({ success, url, results: testResults });
+});
+
+// --- PROGRESS POLLING ---
+// GET /lmv/progress/:downloadId — returns current progress for a running download.
+app.get('/lmv/progress/:downloadId', (req, res) => {
+    const { downloadId } = req.params;
+    const progress = downloadProgress.get(downloadId);
+    if (!progress) {
+        // Not in the progress map — check if it is still active (just started, queue not built yet)
+        return res.json({ found: false, active: activeDownloads.has(downloadId) });
+    }
+    res.json({ found: true, ...progress });
+});
+
+// --- OPEN DOWNLOAD FOLDER IN FILE MANAGER ---
+// POST /lmv/downloads/open/:folderName — opens the folder in Windows Explorer (or equivalent).
+app.post('/lmv/downloads/open/:folderName', (req, res) => {
+    const folderName = req.params.folderName;
+    if (!folderName.startsWith('LMV_DOWNLOADS_')) {
+        return res.status(400).json({ success: false, error: 'Invalid folder name' });
+    }
+    const folderPath = path.join(__dirname, folderName);
+    if (!fs.existsSync(folderPath)) {
+        return res.status(404).json({ success: false, error: 'Folder not found' });
+    }
+    const cmd = process.platform === 'win32'  ? `explorer.exe "${folderPath}"`
+              : process.platform === 'darwin' ? `open "${folderPath}"`
+              : `xdg-open "${folderPath}"`;
+    exec(cmd, err => {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        res.json({ success: true });
+    });
 });
 
 app.listen(port, () => {

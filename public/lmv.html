@@ -108,6 +108,15 @@
             <button type="button" id="start-full-download-btn">🚀 Starta nedladdning för hela Sverige</button>
         </div>
         <hr>
+
+        <div id="progress-section" style="display:none; margin:16px 0;">
+            <div id="progress-label" style="font-size:0.9em; font-weight:600; color:#363636; margin-bottom:6px;">Startar...</div>
+            <div style="background:#e9ecef; border-radius:4px; height:20px; overflow:hidden;">
+                <div id="progress-bar" style="height:100%; width:0%; background:#3273dc; border-radius:4px; transition:width 0.5s ease;"></div>
+            </div>
+            <div id="progress-detail" style="font-size:0.8em; color:#888; margin-top:4px; font-family:monospace;"></div>
+        </div>
+
         <div id="result-message"></div>
         
         <div id="download-section" style="display: none;">

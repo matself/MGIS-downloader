@@ -211,6 +211,61 @@ document.addEventListener('DOMContentLoaded', async () => {
         setCurrentGeometry(feature.geometry, `Län: ${lanName}`, lanName);
     });
 
+    // --- Progress bar polling ---
+    function startProgressPolling(downloadId) {
+        const section  = document.getElementById('progress-section');
+        const label    = document.getElementById('progress-label');
+        const bar      = document.getElementById('progress-bar');
+        const detail   = document.getElementById('progress-detail');
+        if (!section) return;
+
+        section.style.display = 'block';
+        bar.style.background  = '#3273dc';
+        bar.style.width       = '0%';
+        label.textContent     = 'Startar nedladdning...';
+        detail.textContent    = '';
+
+        const timer = setInterval(async () => {
+            try {
+                const res  = await fetch(`/lmv/progress/${encodeURIComponent(downloadId)}`);
+                const data = await res.json();
+
+                if (!data.found) {
+                    if (!data.active) {
+                        clearInterval(timer);
+                        label.textContent    = 'Nedladdning klar ✓';
+                        bar.style.width      = '100%';
+                        bar.style.background = '#48c78e';
+                        detail.textContent   = '';
+                        setTimeout(() => { section.style.display = 'none'; }, 5000);
+                    }
+                    return;
+                }
+
+                const isCollectionMode = data.type === 'collections';
+                const unit  = isCollectionMode ? 'samlingar' : 'filer';
+                const pct   = data.total > 0 ? Math.round((data.done / data.total) * 100) : 0;
+                bar.style.width   = pct + '%';
+                label.textContent = `${data.done} / ${data.total} ${unit} (${pct}%)`;
+                if (data.currentFile) detail.textContent = data.currentFile;
+
+                if (data.status === 'done' || data.status === 'cancelled') {
+                    clearInterval(timer);
+                    const failNote = data.failed > 0 ? ` — ${data.failed} misslyckades` : '';
+                    label.textContent    = data.status === 'cancelled'
+                        ? 'Nedladdning avbruten.'
+                        : `Klar! ${data.done} ${unit} hämtade${failNote}.`;
+                    bar.style.width      = '100%';
+                    bar.style.background = data.status === 'cancelled' ? '#f14668' : '#48c78e';
+                    detail.textContent   = '';
+                    setTimeout(() => { section.style.display = 'none'; }, 6000);
+                }
+            } catch (e) {
+                console.warn('Progress poll error:', e.message);
+            }
+        }, 2000);
+    }
+
     // 2. Initialise download controls
     const messageDiv = document.getElementById('result-message');
     const btn = document.getElementById('start-download-btn');
@@ -275,6 +330,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     if (json.downloadId) {
                         currentDownloadId = json.downloadId;
                         stopBtn.style.display = 'inline-block';
+                        startProgressPolling(json.downloadId);
                     }
                 } else {
                     showMsg('Fel: ' + json.error, 'error');

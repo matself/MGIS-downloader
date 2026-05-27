@@ -117,12 +117,12 @@
             emptyState.style.display = 'none';
             grid.style.display = 'grid';
             
-            // Actualizar estadísticas
+            // Update summary stats
             const totalSize = downloads.reduce((sum, d) => sum + d.size, 0);
             document.getElementById('totalFolders').textContent = downloads.length;
             document.getElementById('totalSize').textContent = formatBytes(totalSize);
-            
-            // Renderizar tarjetas
+
+            // Render one card per download folder
             grid.innerHTML = downloads.map(download => `
                 <div class="download-card">
                     <div class="download-header">
@@ -156,8 +156,11 @@
                     </div>
                     
                     <div class="download-actions">
-                        <button class="btn btn-success btn-sm" onclick="downloadFolder('${download.name}')">
-                            ⬇️ Ladda ner ZIP
+                        <button class="btn btn-primary btn-sm" onclick="openFolder('${download.name}')" title="Öppna mappen i Utforskaren">
+                            📂 Öppna mapp
+                        </button>
+                        <button class="btn btn-success btn-sm" onclick="downloadFolder('${download.name}')" title="Ladda ner hela mappen som ZIP">
+                            ⬇️ ZIP
                         </button>
                         <button class="btn btn-danger btn-sm" onclick="deleteFolder('${download.name}')">
                             🗑️ Ta bort
@@ -167,6 +170,16 @@
             `).join('');
         }
         
+        async function openFolder(folderName) {
+            try {
+                const res = await fetch(`/lmv/downloads/open/${encodeURIComponent(folderName)}`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) alert('Kunde inte öppna mappen: ' + data.error);
+            } catch (e) {
+                alert('Nätverksfel: ' + e.message);
+            }
+        }
+
         function downloadFolder(folderName) {
             const url = `/lmv/downloads/download/${encodeURIComponent(folderName)}`;
             window.location.href = url;
@@ -203,7 +216,7 @@
             loadDownloads();
         }
         
-        // Cargar al inicio
+        // Load on page start
         loadDownloads();
     </script>
 </body>
