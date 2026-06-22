@@ -39,10 +39,6 @@ const GDAL_GDALINFO_CMD = path.join(
     GDAL_BIN,
     process.platform === 'win32' ? 'gdalinfo.exe' : 'gdalinfo'
 );
-// Path to gdal_merge.py: prefer environment override via .env (GDAL_MERGE),
-// otherwise fall back to QGIS root or the legacy hard-coded path.
-const GDAL_MERGE_CMD = (process.env.GDAL_MERGE && process.env.GDAL_MERGE.trim()) || (QGIS_ROOT ? path.join(QGIS_ROOT, 'apps', 'Python312', 'Scripts', 'gdal_merge.py') : 'C:/QGIS/apps/Python312/Scripts/gdal_merge.py');
-console.log('GDAL_MERGE_CMD =', GDAL_MERGE_CMD);
 const GDAL_TRANSLATE_CMD = path.join(
     GDAL_BIN,
     process.platform === 'win32' ? 'gdal_translate.exe' : 'gdal_translate'
@@ -51,7 +47,6 @@ const GDAL_ADDO_CMD = path.join(
     GDAL_BIN,
     process.platform === 'win32' ? 'gdaladdo.exe' : 'gdaladdo'
 );
-const PYTHON_CMD = QGIS_ROOT ? path.join(QGIS_ROOT, 'python-qgis-ltr.bat') : 'python';
 
 // --- UTILITIES ---
 const logFile = path.join(__dirname, 'process.log');
@@ -111,23 +106,45 @@ function runGdalInfo(rasterPath) {
     });
 }
 
-function runGdalMerge(targetDir, tifFiles, outputName) {
-    return new Promise((resolve, reject) => {
-        // Create a file list to avoid command-line length limits
-        const mergeListPath = path.join(targetDir, 'merge_list.txt');
-        fs.writeFileSync(mergeListPath, tifFiles.join('\n'));
-        
-        // Wrap paths in quotes so cmd.exe /c handles spaces in QGIS install path correctly
-        const cmdStr = `"${PYTHON_CMD}" "${GDAL_MERGE_CMD}" -o "${outputName}" --optfile merge_list.txt -co COMPRESS=DEFLATE -co PREDICTOR=2 -co TILED=YES -co BIGTIFF=IF_SAFER`;
-        const child = spawn('cmd.exe', ['/c', cmdStr], { cwd: targetDir, windowsHide: true });
+// Merge a list of TIF tiles into a single compressed GeoTIFF using native GDAL tools.
+// Step 1: gdalbuildvrt -input_file_list  → builds a virtual mosaic from the file list.
+// Step 2: gdal_translate                 → renders the VRT to a real, compressed GeoTIFF.
+// This avoids the Python-wrapper / path-with-spaces issues of gdal_merge.py.
+async function runGdalMerge(targetDir, tifFiles, outputName) {
+    const mergeListPath = path.join(targetDir, 'merge_list.txt');
+    fs.writeFileSync(mergeListPath, tifFiles.join('\n'));
+    const tempVrt = 'temp_merge.vrt';
+
+    // Step 1: build a VRT from the file list
+    await new Promise((resolve, reject) => {
+        const child = spawn(GDAL_BUILDVRT_CMD,
+            ['-input_file_list', 'merge_list.txt', tempVrt],
+            { cwd: targetDir, windowsHide: true });
         let stderr = '';
         child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-        child.on('error', err => reject(err));
-        child.on('close', code => {
-            if (code === 0) return resolve();
-            reject(new Error(stderr.trim() || `gdal_merge.py exited with code ${code}`));
-        });
+        child.on('error', reject);
+        child.on('close', code => code === 0
+            ? resolve()
+            : reject(new Error(stderr.trim() || `gdalbuildvrt exited with code ${code}`)));
     });
+
+    // Step 2: translate VRT → compressed GeoTIFF
+    await new Promise((resolve, reject) => {
+        const child = spawn(GDAL_TRANSLATE_CMD,
+            ['-co', 'COMPRESS=DEFLATE', '-co', 'PREDICTOR=2',
+             '-co', 'TILED=YES', '-co', 'BIGTIFF=IF_SAFER',
+             tempVrt, outputName],
+            { cwd: targetDir, windowsHide: true });
+        let stderr = '';
+        child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+        child.on('error', reject);
+        child.on('close', code => code === 0
+            ? resolve()
+            : reject(new Error(stderr.trim() || `gdal_translate exited with code ${code}`)));
+    });
+
+    // Clean up temp VRT
+    try { fs.unlinkSync(path.join(targetDir, tempVrt)); } catch (e) {}
 }
 
 function runGdalTranslate(targetDir, inputFile, outputFile) {
@@ -591,7 +608,9 @@ async function downloadWithRedirects(url, headers, auth, timeout = 60000) {
     throw new Error('Too many redirects');
 }
 
-// --- Merge, overview, VRT and style generation for a completed raster folder ---
+// --- VRT index and style generation for a completed raster folder ---
+// Keeps all downloaded tiles intact; builds a virtual mosaic (VRT) so the
+// whole area can be opened as a single layer in QGIS / other GIS tools.
 async function runPostProcessing(folderName, vrtBaseName, label) {
     const tifFiles = fs.readdirSync(folderName)
         .filter(name => name.toLowerCase().endsWith('.tif') || name.toLowerCase().endsWith('.tiff'))
@@ -599,26 +618,17 @@ async function runPostProcessing(folderName, vrtBaseName, label) {
     if (tifFiles.length === 0) return; // nothing to process (vector-only collection)
 
     const vrtFileName = `${vrtBaseName}.vrt`;
-    const mergedFileName = `merged_${vrtBaseName}.tif`;
-    const mergedPath = path.join(folderName, mergedFileName);
+    const vrtPath = path.join(folderName, vrtFileName);
 
-    writeToLog(`[${label}] Post-processing: merging ${tifFiles.length} tiles → ${mergedFileName}`);
-    await runGdalMerge(folderName, tifFiles, mergedFileName);
-    writeToLog(`[${label}] Merge complete.`);
-
-    writeToLog(`[${label}] Removing ${tifFiles.length} original tiles...`);
-    tifFiles.forEach(f => { try { fs.unlinkSync(path.join(folderName, f)); } catch(e) {} });
-
-    writeToLog(`[${label}] Building overviews (gdaladdo)...`);
-    await runGdalAddo(folderName, mergedFileName);
-    writeToLog(`[${label}] Overviews complete.`);
-
-    fs.writeFileSync(path.join(folderName, 'filelist.txt'), mergedFileName);
+    // Build VRT index over all downloaded tiles (no pixel copying — fast)
+    writeToLog(`[${label}] Building VRT index over ${tifFiles.length} tiles → ${vrtFileName}`);
+    fs.writeFileSync(path.join(folderName, 'filelist.txt'), tifFiles.join('\n'));
     await runGdalBuildVrt(folderName, 'filelist.txt', vrtFileName);
     writeToLog(`[${label}] VRT generated: ${vrtFileName}`);
 
+    // Generate a QGIS colour-ramp style based on data statistics
     try {
-        const stats = await runGdalInfo(mergedPath);
+        const stats = await runGdalInfo(vrtPath);
         const qmlContent = buildDynamicQml(stats.min, stats.max, 5);
         fs.writeFileSync(path.join(folderName, `${vrtFileName}.qml`), qmlContent, 'utf8');
         writeToLog(`[${label}] Style generated (5-unit intervals).`);
